@@ -82,6 +82,7 @@
             };
             config.Cmd = [ "${pkgs.bash}/bin/bash" "-c" ". ${ufd}/bin/start-server" ];
             config.User = "0";
+            config.WorkingDir = "${ufd}";
           };
         in
         {
