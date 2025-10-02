@@ -1,3 +1,6 @@
 *.gguf
 app.py
 result
+.direnv
+.venv
+models/
