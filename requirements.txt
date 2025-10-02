@@ -1,0 +1,6 @@
+openai
+e2b-code-interpreter
+nbformat
+nbconvert
+jinja2         
+gradio
