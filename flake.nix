@@ -46,6 +46,10 @@
               cat > $out/bin/start-server << EOF
               #!${pkgs.stdenv.shell}
 
+              # 3. Copy necessary runtime files (model, app source)
+              cp -r models $out/ 
+              cp -r src $out/
+              
               echo "Starting llama-server backend on port 8080..."
 
               $LLAMA_SERVER_EXEC \
@@ -65,9 +69,6 @@
               exec $PYTHON_EXEC -m src.app \
               EOF
               chmod +x $out/bin/start-server
-              # 3. Copy necessary runtime files (model, app source)
-              cp -r models $out/ 
-              cp -r src $out/ 
             '';
           };
           dockerImage = pkgs.dockerTools.buildLayeredImage {
