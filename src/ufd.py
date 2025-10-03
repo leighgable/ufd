@@ -7,8 +7,8 @@ from nbconvert import HTMLExporter
 # from e2b_code_interpreter import Sandbox
 from traitlets.config import Config
 import json
-from .prompts import TOOLS
-from .templates import ( assistant_final_answer_template,
+from prompts import TOOLS
+from templates import ( assistant_final_answer_template,
     assistant_thinking_template,
     user_template,
     system_template,

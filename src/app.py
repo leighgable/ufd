@@ -4,8 +4,8 @@ from e2b_code_interpreter import Sandbox
 from pathlib import Path
 import json
 from openai import OpenAI
-from .prompts import DEFAULT_SYSTEM_PROMPT
-from .ufd import run_interactive_notebook, JupyterNotebook
+from prompts import DEFAULT_SYSTEM_PROMPT
+from ufd import run_interactive_notebook, JupyterNotebook
 
 E2B_API_KEY = "e2b_f6b6a6d1bab11a193685469f5d1fe6fe1f3c6c16"
 DEFAULT_MAX_TOKENS = 512
