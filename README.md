@@ -26,10 +26,10 @@ Agentic AI for the Masses!
 
 ### Built With
 
-* [![Agno][Agno]](https://github.com/agno-agi/agno/tree/main)
-* [![LLaMA][llama.cpp]](https://github.com/ggml-org/llama.cpp?tab=readme-ov-file#readme)
-* [![FastAPI][FastAPI]](https://fastapi.tiangolo.com/)
-* [![HTMX][HTMX]](https://htmx.org/)
+* [Agno](https://github.com/agno-agi/agno/tree/main)
+* [llama.cpp](https://github.com/ggml-org/llama.cpp?tab=readme-ov-file#readme)
+* [FastAPI](https://fastapi.tiangolo.com/)
+* [HTMX](https://htmx.org/)
 
 
 <!-- GETTING STARTED -->
@@ -44,13 +44,6 @@ This project uses llama.cpp, specifically llama-server. Also Agno and fastAPI. S
 ### Installation
 
 You can install this project via the flake.nix file if you have Nix installed. The flake also has a docker build. `nix build .#docker`
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-<!-- CONTACT -->
-## Contact
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
