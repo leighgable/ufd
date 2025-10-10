@@ -12,23 +12,10 @@
 <br />
 <div align="center">
   <a href="https://github.com/leighgable/ufd">
-    <img src="ufd.png" alt="Logo" width="80" height="80">
+    <img src="ufd.png" alt="Logo" width="180" height="180">
   </a>
 
 <h3 align="center">UFD AGENT</h3>
-
-  <p align="center">
-    project_description
-    <br />
-    <a href="https://github.com/github_username/repo_name"><strong>Explore the docs »</strong></a>
-    <br />
-    <br />
-    <a href="https://github.com/github_username/repo_name">View Demo</a>
-    &middot;
-    <a href="https://github.com/github_username/repo_name/issues/new?labels=bug&template=bug-report---.md">Report Bug</a>
-    &middot;
-    <a href="https://github.com/github_username/repo_name/issues/new?labels=enhancement&template=feature-request---.md">Request Feature</a>
-  </p>
 </div>
 
 
@@ -37,19 +24,12 @@
 
 Agentic AI for the Masses!
 
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-
-
 ### Built With
 
-* [![Agno][Agno]][https://github.com/agno-agi/agno/tree/main]
-* [![LLaMA][llama.cpp]][https://github.com/ggml-org/llama.cpp?tab=readme-ov-file#readme]
-* [![FastAPI][FastAPI]][https://fastapi.tiangolo.com/]
-* [![HTMX][HTMX]][https://htmx.org/]
-
-<p align="right">(<a href="#readme-top">back to top</a>)</p>
-
+* [![Agno][Agno]](https://github.com/agno-agi/agno/tree/main)
+* [![LLaMA][llama.cpp]](https://github.com/ggml-org/llama.cpp?tab=readme-ov-file#readme)
+* [![FastAPI][FastAPI]](https://fastapi.tiangolo.com/)
+* [![HTMX][HTMX]](https://htmx.org/)
 
 
 <!-- GETTING STARTED -->
@@ -65,31 +45,14 @@ This project uses llama.cpp, specifically llama-server. Also Agno and fastAPI. S
 
 You can install this project via the flake.nix file if you have Nix installed. The flake also has a docker build. `nix build .#docker`
 
-_For more examples, please refer to the [Documentation](https://nixos.org)_
-
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 <!-- CONTACT -->
 ## Contact
 
-Your Name - [@twitter_handle](https://twitter.com/twitter_handle) - email@email_client.com
-
-Project Link: [https://github.com/github_username/repo_name](https://github.com/github_username/repo_name)
-
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
-
-
-<!-- ACKNOWLEDGMENTS -->
-## Acknowledgments
-
-* []()
-* []()
-* []()
-
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
-
-
 
 <!-- MARKDOWN LINKS & IMAGES -->
 <!-- https://www.markdownguide.org/basic-syntax/#reference-style-links -->
