@@ -3,3 +3,7 @@ result
 .direnv
 .venv
 models/
+llama_experiment.cpp
+key.txt
+__pycache__/
+tmp/

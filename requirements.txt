@@ -1,6 +1,10 @@
+mcp
+agno
+fastapi[standard]
+sqlalchemy
 openai
-e2b-code-interpreter
-nbformat
-nbconvert
-jinja2         
-gradio
+requests
+jinja2
+markdown
+python-multipart
+e2b_code_interpreter

@@ -1,174 +1,168 @@
+import time
 import os
-import gradio as gr
-from e2b_code_interpreter import Sandbox
-from pathlib import Path
-import json
-from openai import OpenAI
-from prompts import DEFAULT_SYSTEM_PROMPT
-from ufd import run_interactive_notebook, JupyterNotebook
+import requests
+from fastapi import FastAPI, Request, Form
+from fastapi.responses import HTMLResponse, StreamingResponse
+from jinja2 import ( Environment,
+    FileSystemLoader,
+    select_autoescape,
+    DictLoader,
+)
+import python_multipart
+import markdown
 
-E2B_API_KEY = "e2b_f6b6a6d1bab11a193685469f5d1fe6fe1f3c6c16"
-DEFAULT_MAX_TOKENS = 512
-SANDBOXES = {}
-SANDBOX_TIMEOUT = int(60 * 59)
-TMP_DIR = './tmp/'
-model_name = "Qwen3-0.6B-Q8_0.gguf"
-model = "Qwen3"
-init_notebook = JupyterNotebook()
+from .ufd import ufd_agent
 
-if not os.path.exists(TMP_DIR):
-    os.makedirs(TMP_DIR)
+# --- Configuration ---
+# Your llama-server C++ backend runs at port 8080 inside the container.
+LLM_SERVER_URL = "http://127.0.0.1:8080/v1/chat/completions"
 
-with open(TMP_DIR+"jupyter-agent.ipynb", 'w', encoding='utf-8') as f:
-    json.dump(JupyterNotebook().data, f, indent=2)
+# --- Template Definitions (In a production app, these would be in separate .html files) ---
 
-def list_files_with_relative_paths(start_dir: str):
-    if not os.path.isdir(start_dir):
-        print(f"Error: Directory not found or is not a directory: {start_dir}")
-        return []
-
-    # Normalize the starting path to ensure consistency
-    start_dir = os.path.abspath(start_dir)
-    relative_file_paths = []
-    try:
-        for root, _, files in os.walk(start_dir):
-            for file_name in files:
-                # 1. Construct the full absolute path
-                full_path = os.path.join(root, file_name)
-
-                # 2. Calculate the path relative to the starting directory
-                # This uses os.path.relpath(path, start=current_directory)
-                relative_path = os.path.relpath(full_path, start_dir)
-                
-                relative_file_paths.append(relative_path)
-
-    except OSError as e:
-        print(f"An OS error occurred during directory traversal: {e}")
-        return []
-
-    return relative_file_paths
-
-def execute_jupyter_agent(
-    user_input, files, message_history, request: gr.Request
-):
-
-    if request.session_hash not in SANDBOXES:
-        SANDBOXES[request.session_hash] = Sandbox.create(timeout=SANDBOX_TIMEOUT, api_key=E2B_API_KEY)
-    sbx = SANDBOXES[request.session_hash]
-
-    save_dir = os.path.join(TMP_DIR, request.session_hash)
-    os.makedirs(save_dir, exist_ok=True)
-    save_dir = os.path.join(save_dir, 'jupyter-agent.ipynb')
-
-    with open(save_dir, 'w', encoding='utf-8') as f:
-        json.dump(init_notebook.data, f, indent=2)
-    yield init_notebook.render(), message_history, save_dir
-
-    client = OpenAI(
-        base_url="http://localhost:8080/v1",
-        api_key="FAKE_TOKEN",
-    )
-
-    filenames = []
-    if files is not None:
-        for filepath in files:
-            fpath = Path(filepath)
-            with open(filepath, "rb") as file:
-                print(f"uploading {filepath}...")
-                sbx.files.write(fpath.name, file)
-                filenames.append(fpath.name)
-
-    system_prompt = DEFAULT_SYSTEM_PROMPT
-    # Initialize message_history if it doesn't exist
-    if len(message_history) == 0:
-        if files is None:
-            system_prompt = system_prompt.format("- None")
-        else:
-            system_prompt = system_prompt.format("- " + "\n- ".join(filenames))
-
-        message_history.append(
-            {
-                "role": "system",
-                "content": system_prompt,
-            }
-        )
-    message_history.append({"role": "user", "content": user_input})
-
-    # print("history:", message_history)
-
-    for notebook_html, notebook_data, messages in run_interactive_notebook(
-        client, model, message_history, sbx,
-    ):
-        message_history = messages
+INDEX_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>llama</title>
+    <!-- Load Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Load HTMX -->
+    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
+    <style>
+        .chat-bubble { max-width: 80%; }
+    </style>
+</head>
+<body class="bg-gray-50 flex flex-col h-screen antialiased">
+    <div class="flex flex-col flex-1 max-w-4xl mx-auto w-full p-4">
+        <h1 class="text-3xl font-bold text-center text-gray-800 mb-6">UFD Chat</h1>
         
-        yield notebook_html, message_history, TMP_DIR+"jupyter-agent.ipynb"
-    
-    with open(save_dir, 'w', encoding='utf-8') as f:
-        json.dump(notebook_data, f, indent=2)
-    yield notebook_html, message_history, save_dir
+        <!-- Chat Area -->
+        <div id="chat-messages" class="flex-1 overflow-y-auto space-y-4 p-4 bg-white rounded-lg shadow-inner">
+            <!-- Messages will be injected here -->
+            <div class="chat-bubble bg-gray-200 text-gray-800 p-3 rounded-xl">
+                Hello! Ask me anything.
+            </div>
+        </div>
 
-def clear(msg_state, request: gr.Request):
-    if request.session_hash in SANDBOXES:
-        SANDBOXES[request.session_hash].kill()
-        SANDBOXES.pop(request.session_hash)
-
-    msg_state = []
-    return init_notebook.render(), msg_state
-
-
-css = """
-#component-0 {
-    height: 100vh;
-    overflow-y: auto;
-    padding: 20px;
-}
-.gradio-container {
-    height: 100vh !important;
-}
-.contain {
-    height: 100vh !important;
-}
+        <!-- Input Form -->
+        <form hx-post="/chat" hx-target="#chat-messages" hx-swap="beforeend" class="mt-4 flex space-x-2 p-4 bg-white rounded-lg shadow">
+            <input type="text" name="prompt" placeholder="Ask the model..."
+                   class="flex-1 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500" required>
+            <button type="submit" class="px-6 py-3 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition duration-150">
+                Send
+            </button>
+        </form>
+    </div>
+</body>
+</html>
 """
-# Create the interface
-with gr.Blocks() as demo:
-    msg_state = gr.State(value=[])
 
-    html_output = gr.HTML(value=JupyterNotebook().render())
-    
-    user_input = gr.Textbox(
-        #value="Write code to multiply three numbers: 10048, 32, 19", lines=3, label="Agent task"
-        value="Open the attached Excel files and list the column names.", label="Agent task"
-    )
+# Template for a single response fragment (HTMX swap target)
+RESPONSE_TEMPLATE = """
+<!-- User Message Bubble -->
+<div class="flex justify-end">
+    <div class="chat-bubble bg-indigo-500 text-white p-3 rounded-xl">
+        {{ user_prompt }}
+    </div>
+</div>
 
-    with gr.Row():
-        generate_btn = gr.Button("Run!")
-        clear_btn = gr.Button("Clear Notebook")
-    
-    with gr.Accordion("Upload files ⬆ | Download notebook⬇", open=False):
-        files = gr.File(label="Upload files to use",
-                        file_count="multiple")
-        file = gr.File(TMP_DIR+"jupyter-agent.ipynb", label="Download Jupyter Notebook")
-
-    generate_btn.click(
-        fn=execute_jupyter_agent,
-        inputs=[user_input, files, msg_state],
-        outputs=[html_output, msg_state, file],
-        show_progress="hidden",
-    )
-
-    clear_btn.click(fn=clear, inputs=[msg_state], outputs=[html_output, msg_state])
-
-    demo.load(
-        fn=None,
-        inputs=None,
-        outputs=None,
-        js=""" () => {
-    if (document.querySelectorAll('.dark').length) {
-        document.querySelectorAll('.dark').forEach(el => el.classList.remove('dark'));
-    }
-}
+<!-- Assistant Message Bubble -->
+<div class="flex justify-start">
+    <div class="chat-bubble bg-gray-200 text-gray-800 p-3 rounded-xl">
+        {{ assistant_response }}
+    </div>
+</div>
 """
-    )
 
-demo.launch(ssr_mode=False, server_name="0.0.0.0", server_port=7860)
 
+templates = {
+    'index.html': INDEX_TEMPLATE,
+    'response.html': RESPONSE_TEMPLATE
+}
+
+jinja_env = Environment(loader=DictLoader(templates), autoescape=select_autoescape(['html']))
+
+# --- FastAPI Setup ---
+app = FastAPI()
+
+async def generate_llm_response(prompt: str) -> str:
+    """Proxies the request to the llama-server C++ backend."""
+    try:
+        start_time = time.time()
+        generator = ufd_agent.arun(input=prompt)
+        async for event in generator:
+            current_time = time.time() - start_time
+            if hasattr(event, "event"):
+                if "RunCompleted" in event.event:
+                    yield f"{event.content}\n"
+                elif "RunStarted" in event.event:
+                    yield  f"[{current_time:.2f}s] {event.event}\n"
+        total_time = time.time() - start_time
+        yield f"Total execution time: {total_time:.2f}s\n"
+
+    except requests.exceptions.RequestException as e:
+        print(f"Error connecting to LLM server: {e}")
+        yield f"Error: Could not connect to LLM server at {LLM_SERVER_URL}"
+
+@app.get("/", response_class=HTMLResponse)
+async def get_index(request: Request):
+    """Serves the main HTMX-enabled chat page."""
+    template = jinja_env.get_template('index.html')
+    return template.render()
+
+async def combined_stream_generator(prompt: str):
+    """
+    Yields the full HTML fragment for HTMX, starting with the user message, 
+    followed by the streaming assistant content, and closing tags.
+    """
+    # 1. Yield the User Message HTML (fully rendered)
+    yield f"""
+<!-- User Message Bubble -->
+<div class="flex justify-end">
+    <div class="chat-bubble bg-indigo-500 text-white p-3 rounded-xl">
+        {prompt}
+    </div>
+</div>
+
+<!-- Assistant Message Bubble (START) -->
+<div class="flex justify-start">
+    <div class="chat-bubble bg-gray-200 text-gray-800 p-3 rounded-xl">
+"""
+
+    # 2. Yield LLM tokens (raw text)
+    # The browser/HTMX will append this raw text continuously to the DOM.
+    async for token in generate_llm_response(prompt):
+        if token is not None:
+            if "Total execution time:" in token:
+                final_time_message = token
+            else:
+                yield token.replace('\n', '<br>')
+        
+    # 3. Yield the closing HTML tags
+    yield """
+    </div>
+</div>
+"""
+    # 4. Yield the Annotation BELOW the bubble
+    if final_time_message:
+        yield f"""
+<!-- Annotation: Total execution time placed outside the main bubble -->
+<div class="flex justify-start text-xs text-gray-500 mt-1 mb-4 pl-3">
+    {final_time_message}
+</div>
+"""
+
+@app.post("/chat", response_class=HTMLResponse)
+async def post_chat(prompt: str = Form(...)):
+    """
+    Handles HTMX POST request, calls the LLM, and returns the HTML fragment 
+    to swap into the #chat-messages container.
+    """
+    # The StreamingResponse handles the asynchronous delivery of the generator's output
+    return StreamingResponse(combined_stream_generator(prompt), media_type="text/html")
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=7860)

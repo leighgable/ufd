@@ -1,32 +1,62 @@
-from ufd import ChatOutput
-import datetime
+import asyncio
+from agno.agent import RunEvent
+from .ufd import ufd_agent
+from agno.utils.pprint import apprint_run_response
+from typing import Any
+prompt = "What is the capital of China?"
+
+tool_prompt = "Write me a python function that takes a number and returns the square root."
+
+async def run_agent_with_events(agent: Any, prompt: str):
+    content_started = False
+    async for run_output_event in agent.arun(
+        prompt,
+    ):
+        if run_output_event.event in [RunEvent.run_started, RunEvent.run_completed]:
+            print(f"\nEVENT: {run_output_event.event}")
+
+        if run_output_event.event in [RunEvent.reasoning_started]:
+            print(f"\nEVENT: {run_output_event.event}")
+
+        if run_output_event.event in [RunEvent.reasoning_step]:
+            print(f"\nEVENT: {run_output_event.event}")
+            print(f"REASONING CONTENT: {run_output_event.reasoning_content}")
+
+        if run_output_event.event in [RunEvent.reasoning_completed]:
+            print(f"\nEVENT: {run_output_event.event}")
+
+        if run_output_event.event in [RunEvent.tool_call_started]:
+            print(f"\nEVENT: {run_output_event.event}")
+            print(f"TOOL CALL: {run_output_event.tool.tool_name}")  # type: ignore
+            print(f"TOOL CALL ARGS: {run_output_event.tool.tool_args}")  # type: ignore
+
+        if run_output_event.event in [RunEvent.run_content]:
+            if not content_started:
+                print("\nCONTENT:")
+                content_started = True
+            else:
+                if run_output_event.content is not None:
+                    print(run_output_event.content, end="")
 
 
-def main():
-    """Create a mock chat_output to test styling"""
-    # Create mock messages
-    mock_messages = [
-        {"role": "system", "content": "You are a helpful AI assistant that can write and execute Python code."},
-        {"role": "user", "content": "Can you help me create a simple plot of a sine wave?"},
-        {"role": "assistant", "content": "I'll help you create a sine wave plot using matplotlib. Let me write the code for that."},
-        {"role": "assistant", "tool_calls": [{"id": "call_1", "function": {"name": "execute_code", "arguments": '{"code": "import numpy as np\\nimport matplotlib.pyplot as plt\\n\\n# Create x values\\nx = np.linspace(0, 4*np.pi, 100)\\ny = np.sin(x)\\n\\n# Create the plot\\nplt.figure(figsize=(10, 6))\\nplt.plot(x, y, \'b-\', linewidth=2)\\nplt.title(\'Sine Wave\')\\nplt.xlabel(\'x\')\\nplt.ylabel(\'sin(x)\')\\nplt.grid(True)\\nplt.show()"}'}}]},
-        {"role": "tool", "tool_call_id": "call_1", "raw_execution": [{"output_type": "stream", "name": "stdout", "text": "Plot created successfully!"}]}
-    ]
+async def streaming(agent: Any):
+    async for response in agent.arun(input=prompt):
+        print(response.content, end="", flush=True)
+
+async def streaming_print(agent: Any):
+    await agent.aprint_response(input=prompt)
+
+async def streaming_pprint(agent: Any):
+    await apprint_run_response(agent.arun(input=prompt))
+async def event_debug(agent: Any):
+    generator = ufd_agent.arun(tool_prompt)
+    async for event in generator:
+        print(f"{event.event}: {event.content}\n")
+if __name__=="__main__":
+    asyncio.run(run_agent_with_events(ufd_agent, tool_prompt))
+
+    # ufd_agent.cli_app(stream=True, debug_mode=True)
+    # asyncio.run(streaming(ufd_agent))
+    # asyncio.run(streaming_print(ufd_agent))
+    # asyncio.run(streaming_pprint(ufd_agent))  
     
-    # Create chat_output
-    chat_output = ChatOutput(mock_messages)
-    
-    # Add a timeout countdown (simulating a sandbox that started 2 minutes ago with 5 minute timeout)
-    start_time = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=2)
-    end_time = start_time + datetime.timedelta(minutes=5)
-    chat_output.add_sandbox_countdown(start_time, end_time)
-
-    html_output = chat_output.render()
-    with open("mock_chat_output.html", "w", encoding="utf-8") as f:
-        f.write(html_output)
-    print(html_output)
-    print("Mock chat_output saved as 'mock_chat_output.html'")
-    print("Open it in your browser to see the styling changes.")
-
-if __name__ == "__main__":
-    main()

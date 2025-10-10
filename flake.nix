@@ -30,12 +30,7 @@
             postPatch = '''';
           });
           pythonEnv = pkgs.python3.withPackages (p: [
-            p.gradio
-            p.openai
-            p.e2b-code-interpreter
-            p.nbformat
-            p.nbconvert
-            p.jinja2
+            p.ipython
           ]);
 
           ufd = pkgs.stdenv.mkDerivation {
@@ -59,11 +54,11 @@
               mkdir -p $out/src
 
               # This pattern ($src/dir/., $out/dir/) is the most robust copy method.
-              cp -r $src/src $out/src/
+              cp -r $src/src/. $out/src/
               # ------------------------------------------
-              ls -la $src
-              echo "_________________"
-              ls -la $out
+              # ls -la $src
+              # echo "_________________"
+              # ls -la $out
               # create a startup script
               cat > $out/bin/start-server << EOF
               #!${pkgs.stdenv.shell}
@@ -80,9 +75,11 @@
                 -c 20480 \
                 -n 16384 \
                 --no-context-shift \
-                --chat-template $APP_ROOT_PATH/src/llama3.jinja \
-                --port 8080 & # Explicitly set port
+                --chat-template-file $APP_ROOT_PATH/src/llama3.jinja \
+                -p 8080 & \
               echo "Starting gradio frontend on port 7860"
+
+              
               exec $PYTHON_EXEC $APP_ROOT_PATH/src/app.py \
               EOF
               chmod +x $out/bin/start-server
@@ -93,7 +90,7 @@
             name = "united-fisheries-data";
             tag = "latest";
 
-            contents = [ pkgs.glibc pkgs.bash ];
+            contents = [ pkgs.glibc pkgs.bash pkgs.coreutils ];
             
             config.ExposedPorts = {
               "7860/tcp" = {};
@@ -105,7 +102,7 @@
           };
         in
         {
-          inherit pkgs ufd llama-cpp-vulkan dockerImage;
+          inherit pkgs ufd llama-cpp-vulkan dockerImage pythonEnv;
         };
       allConfigs = forAllSystems systemConfigurations;
 
@@ -115,7 +112,7 @@
           default = allConfigs.${system}.pkgs.mkShell {
             packages = [
               allConfigs.${system}.llama-cpp-vulkan
-              allConfigs.${system}.pkgs.python3
+              allConfigs.${system}.pythonEnv
               allConfigs.${system}.pkgs.uv
               allConfigs.${system}.pkgs.vulkan-tools
             ];
@@ -124,6 +121,8 @@
               uv sync
               . .venv/bin/activate
               uv pip install -r requirements.txt --quiet
+              E2B_API_KEY=$(cat key.txt)
+              export E2B_API_KEY              
             '';
           };
         });
