@@ -1,167 +1,200 @@
-import time
-import os
-import requests
-from fastapi import FastAPI, Request, Form
-from fastapi.responses import HTMLResponse, StreamingResponse
-from jinja2 import ( Environment,
-    FileSystemLoader,
-    select_autoescape,
-    DictLoader,
+import asyncio
+import urllib.parse
+from textwrap import dedent
+from typing import Dict, Any
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi.responses import HTMLResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
+from openai import AsyncOpenAI
+
+# --- New Imports for the Async Agent ---
+from .streaming import (
+    function_worker_async,
+    parse_delta_enqueue_calls,
+    model_cfg,
 )
-import python_multipart
-import markdown
+from src.utils import create_message_with_files
 
-from .ufd import ufd_agent
+# --- Variables from old templates.py ---
+react_instructions = dedent("""
+        You are an expert with strong analytical skills! 🧠
+        Don't overthink your answers, and use your python tool to test your code.\n""")
 
-# --- Configuration ---
-# Your llama-server C++ backend runs at port 8080 inside the container.
-LLM_SERVER_URL = "http://127.0.0.1:8080/v1/chat/completions"
+AVAILABLE_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_code_interpreter",
+            "description": "A powerful Python code execution environment for complex math, data analysis, and general programming tasks. Input only raw Python code, no explanation needed.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "code": {
+                        "type": "string",
+                        "description": "The python code to execute."
+                    },
+                },
+                "required": ["code"]
+            }
+        }
+    },
+]
 
-# --- Template Definitions (In a production app, these would be in separate .html files) ---
+functions = [tool["function"] for tool in AVAILABLE_TOOLS]
 
-INDEX_TEMPLATE = """
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>llama</title>
-    <!-- Load Tailwind CSS -->
-    <script src="https://cdn.tailwindcss.com"></script>
-    <!-- Load HTMX -->
-    <script src="https://unpkg.com/htmx.org@1.9.10"></script>
-    <style>
-        .chat-bubble { max-width: 80%; }
-    </style>
-</head>
-<body class="bg-gray-50 flex flex-col h-screen antialiased">
-    <div class="flex flex-col flex-1 max-w-4xl mx-auto w-full p-4">
-        <h1 class="text-3xl font-bold text-center text-gray-800 mb-6">UFD Chat</h1>
-        
-        <!-- Chat Area -->
-        <div id="chat-messages" class="flex-1 overflow-y-auto space-y-4 p-4 bg-white rounded-lg shadow-inner">
-            <!-- Messages will be injected here -->
-            <div class="chat-bubble bg-gray-200 text-gray-800 p-3 rounded-xl">
-                Hello! Ask me anything.
-            </div>
-        </div>
-
-        <!-- Input Form -->
-        <form hx-post="/chat" hx-target="#chat-messages" hx-swap="beforeend" class="mt-4 flex space-x-2 p-4 bg-white rounded-lg shadow">
-            <input type="text" name="prompt" placeholder="Ask the model..."
-                   class="flex-1 p-3 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-indigo-500" required>
-            <button type="submit" class="px-6 py-3 bg-indigo-600 text-white font-semibold rounded-lg hover:bg-indigo-700 transition duration-150">
-                Send
-            </button>
-        </form>
-    </div>
-</body>
-</html>
-"""
-
-# Template for a single response fragment (HTMX swap target)
-RESPONSE_TEMPLATE = """
-<!-- User Message Bubble -->
-<div class="flex justify-end">
-    <div class="chat-bubble bg-indigo-500 text-white p-3 rounded-xl">
-        {{ user_prompt }}
-    </div>
-</div>
-
-<!-- Assistant Message Bubble -->
-<div class="flex justify-start">
-    <div class="chat-bubble bg-gray-200 text-gray-800 p-3 rounded-xl">
-        {{ assistant_response }}
-    </div>
-</div>
-"""
-
-
-templates = {
-    'index.html': INDEX_TEMPLATE,
-    'response.html': RESPONSE_TEMPLATE
-}
-
-jinja_env = Environment(loader=DictLoader(templates), autoescape=select_autoescape(['html']))
+# This will hold our persistent agent components
+agent_context: Dict[str, Any] = {}
 
 # --- FastAPI Setup ---
 app = FastAPI()
+app.mount("/static", StaticFiles(directory="src/static"), name="static")
 
-async def generate_llm_response(prompt: str) -> str:
-    """Proxies the request to the llama-server C++ backend."""
-    try:
-        start_time = time.time()
-        generator = ufd_agent.arun(input=prompt)
-        async for event in generator:
-            current_time = time.time() - start_time
-            if hasattr(event, "event"):
-                if "RunCompleted" in event.event:
-                    yield f"{event.content}\n"
-                elif "RunStarted" in event.event:
-                    yield  f"[{current_time:.2f}s] {event.event}\n"
-        total_time = time.time() - start_time
-        yield f"Total execution time: {total_time:.2f}s\n"
+@app.on_event("startup")
+async def startup_event():
+    """Initializes the agent components when the application starts."""
+    print("--- Application starting up... ---")
+    agent_context["call_queue"] = asyncio.Queue()
+    agent_context["result_queue"] = asyncio.Queue()
+    agent_context["client"] = AsyncOpenAI(model_cfg=model_cfg)
+    agent_context["worker_task"] = asyncio.create_task(function_worker_async(
+        call_queue=agent_context["call_queue"],
+        result_queue=agent_context["result_queue"],
+    ))
+    print("--- Agent worker started in the background. ---")
 
-    except requests.exceptions.RequestException as e:
-        print(f"Error connecting to LLM server: {e}")
-        yield f"Error: Could not connect to LLM server at {LLM_SERVER_URL}"
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Gracefully shuts down the agent worker."""
+    print("--- Application shutting down... ---")
+    if "worker_task" in agent_context and not agent_context["worker_task"].done():
+        agent_context["call_queue"].put_nowait(None)
+        agent_context["worker_task"].cancel()
+        await asyncio.sleep(1)
+    print("--- Agent worker shut down. ---")
 
 @app.get("/", response_class=HTMLResponse)
-async def get_index(request: Request):
-    """Serves the main HTMX-enabled chat page."""
-    template = jinja_env.get_template('index.html')
-    return template.render()
+async def get_index():
+    return FileResponse("src/static/index.html")
 
-async def combined_stream_generator(prompt: str):
-    """
-    Yields the full HTML fragment for HTMX, starting with the user message, 
-    followed by the streaming assistant content, and closing tags.
-    """
-    # 1. Yield the User Message HTML (fully rendered)
-    yield f"""
-<!-- User Message Bubble -->
-<div class="flex justify-end">
-    <div class="chat-bubble bg-indigo-500 text-white p-3 rounded-xl">
-        {prompt}
-    </div>
-</div>
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    await websocket.accept()
+    try:
+        while True:
+            message_data = await websocket.receive_text()
+            parsed_data = urllib.parse.parse_qs(message_data)
+            
+            prompt = parsed_data.get("prompt", [""])[0]
+            show_reasoning_str = parsed_data.get("show_reasoning", ["false"])[0]
+            max_iterations_str = parsed_data.get("max_iterations", ["5"])[0]
 
-<!-- Assistant Message Bubble (START) -->
-<div class="flex justify-start">
-    <div class="chat-bubble bg-gray-200 text-gray-800 p-3 rounded-xl">
-"""
+            show_reasoning = show_reasoning_str in ["true", "on"]
+            max_iterations = int(max_iterations_str)
 
-    # 2. Yield LLM tokens (raw text)
-    # The browser/HTMX will append this raw text continuously to the DOM.
-    async for token in generate_llm_response(prompt):
-        if token is not None:
-            if "Total execution time:" in token:
-                final_time_message = token
-            else:
-                yield token.replace('\n', '<br>')
-        
-    # 3. Yield the closing HTML tags
-    yield """
-    </div>
-</div>
-"""
-    # 4. Yield the Annotation BELOW the bubble
-    if final_time_message:
-        yield f"""
-<!-- Annotation: Total execution time placed outside the main bubble -->
-<div class="flex justify-start text-xs text-gray-500 mt-1 mb-4 pl-3">
-    {final_time_message}
-</div>
-"""
+            response_id = int(asyncio.get_running_loop().time() * 1000)
+            reasoning_id = f"reasoning-{response_id}"
+            content_id = f"content-{response_id}"
 
-@app.post("/chat", response_class=HTMLResponse)
-async def post_chat(prompt: str = Form(...)):
-    """
-    Handles HTMX POST request, calls the LLM, and returns the HTML fragment 
-    to swap into the #chat-messages container.
-    """
-    # The StreamingResponse handles the asynchronous delivery of the generator's output
-    return StreamingResponse(combined_stream_generator(prompt), media_type="text/html")
+            # --- Part 1: Send the user's message bubble ---
+            file_names = [] # Files are not handled via WebSocket form submission directly
+            file_list_html = ""
+            # This block will currently not execute as file_names is empty
+            if file_names: 
+                items = "".join([f"<li>{name}</li>" for name in file_names])
+                file_list_html = f"<div class='file-list'>Attached:<ul>{items}</ul></div>"
+            
+            display_prompt = prompt + file_list_html
+            user_bubble = f'''
+                <div hx-swap-oob="beforeend:#chat-messages">
+                    <div class="flex justify-end">
+                        <div class="chat-bubble bg-primary text-white p-3 rounded-lg">
+                            {display_prompt}
+                        </div>
+                    </div>
+                </div>
+            '''
+            await websocket.send_text(user_bubble)
+
+            # --- Part 2: Send the agent's initial bubble with containers ---
+            agent_bubble_start = f'''
+                <div hx-swap-oob="beforeend:#chat-messages">
+                    <div class="flex justify-start">
+                        <div class="chat-bubble bg-gray-200 text-gray-800 p-3 rounded-xl">
+                            <div id='{reasoning_id}'></div>
+                            <div id='{content_id}'></div>
+                        </div>
+                    </div>
+                </div>
+            '''
+            await websocket.send_text(agent_bubble_start)
+
+            # --- Part 3: Run the agent logic and stream responses ---
+            await agent_stream_logic(websocket, prompt, show_reasoning, reasoning_id, content_id, max_iterations)
+
+    except WebSocketDisconnect:
+        print("Client disconnected from WebSocket.")
+    except Exception as e:
+        print(f"WebSocket error: {e}")
+        # Send an error message to the client
+        error_html = f'<div id="chat-messages" hx-swap-oob="beforeend" class="text-sm text-red-500">[WebSocket Error]: {e}</div>'
+        await websocket.send_text(error_html)
+
+async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: bool, reasoning_id: str, content_id: str, max_iterations: int) -> None:
+    """The main agent loop, now sending HTML directly over WebSocket."""
+    # 1. Create the user message for this turn
+    user_message = create_message_with_files(prompt, [])
+
+    # 2. Initialize the full message history for the agent,
+    #    starting with the system prompt.
+    current_messages = [{
+        "role": "system", "content": react_instructions
+    }]
+    current_messages.extend(user_message)
+    
+    async_client = agent_context["client"]
+    call_queue = agent_context["call_queue"]
+    result_queue = agent_context["result_queue"]
+
+    while not call_queue.empty():
+        call_queue.get_nowait()
+    while not result_queue.empty():
+        result_queue.get_nowait()
+
+    try:
+        for turn in range(max_iterations):
+            stream = async_client.chat.completions.create(messages=current_messages, tools=functions, stream=True)
+            had_tool_call_in_turn = False
+
+            async for event in parse_delta_enqueue_calls(stream, call_queue, show_reasoning):
+                event_type = event.get("type")
+                data = event.get("data")
+                html_chunk = ""
+
+                if event_type == "reasoning":
+                    html_chunk = f'<span hx-swap-oob="beforeend:#{reasoning_id}">{data.replace("\n", "<br>")}</span>'
+                elif event_type == "content":
+                    html_chunk = f'<span hx-swap-oob="beforeend:#{content_id}">{data.replace("\n", "<br>")}</span>'
+                elif event_type == "tool_call":
+                    had_tool_call_in_turn = True
+                    html_chunk = f'<div hx-swap-oob="beforeend:#{reasoning_id}" class="text-xs text-blue-400">[Tool Call: {data.get("name")}]</div>'
+                
+                if html_chunk:
+                    await websocket.send_text(html_chunk)
+
+            await call_queue.join()
+
+            if not had_tool_call_in_turn:
+                break
+
+            results = []
+            while not result_queue.empty():
+                results.append(await result_queue.get())
+            
+            current_messages.extend(results)
+
+    except Exception as e:
+        error_html = f'<div hx-swap-oob="beforeend:#{content_id}" class="text-sm text-red-500">[Error]: {e}</div>'
+        await websocket.send_text(error_html)
 
 if __name__ == "__main__":
     import uvicorn

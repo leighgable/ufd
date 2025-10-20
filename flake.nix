@@ -115,14 +115,17 @@
               allConfigs.${system}.pythonEnv
               allConfigs.${system}.pkgs.uv
               allConfigs.${system}.pkgs.vulkan-tools
+              allConfigs.${system}.pkgs.nodejs_22
             ];
             shellHook = ''
               unset PYTHONPATH
-              uv sync
+              uv sync --upgrade
               . .venv/bin/activate
               uv pip install -r requirements.txt --quiet
               E2B_API_KEY=$(cat key.txt)
-              export E2B_API_KEY              
+              export E2B_API_KEY
+              alias npm='nix run .#npm --'
+              alias npx='nix run .#npx --'              
             '';
           };
         });

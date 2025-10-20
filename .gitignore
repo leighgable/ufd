@@ -2,8 +2,12 @@
 result
 .direnv
 .venv
+package-lock.json
+package.json
+node_modules/
 models/
 llama_experiment.cpp
 key.txt
 __pycache__/
 tmp/
+node_modules/

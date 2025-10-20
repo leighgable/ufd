@@ -1,5 +1,5 @@
 mcp
-agno
+websockets
 fastapi[standard]
 sqlalchemy
 openai
@@ -8,3 +8,4 @@ jinja2
 markdown
 python-multipart
 e2b_code_interpreter
+qwen-agent
