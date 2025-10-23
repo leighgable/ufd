@@ -13,12 +13,12 @@ from .streaming import (
     parse_delta_enqueue_calls,
     model_cfg,
 )
-from src.utils import create_message_with_files
 
 # --- Variables from old templates.py ---
 react_instructions = dedent("""
         You are an expert with strong analytical skills! 🧠
         Don't overthink your answers, and use your python tool to test your code.\n""")
+
 
 AVAILABLE_TOOLS = [
     {
@@ -34,8 +34,10 @@ AVAILABLE_TOOLS = [
                         "description": "The python code to execute."
                     },
                 },
-                "required": ["code"]
-            }
+                "required": ["code"],
+                
+            },
+            "strict": True
         }
     },
 ]
@@ -55,7 +57,7 @@ async def startup_event():
     print("--- Application starting up... ---")
     agent_context["call_queue"] = asyncio.Queue()
     agent_context["result_queue"] = asyncio.Queue()
-    agent_context["client"] = AsyncOpenAI(model_cfg=model_cfg)
+    agent_context["client"] = AsyncOpenAI(**model_cfg)
     agent_context["worker_task"] = asyncio.create_task(function_worker_async(
         call_queue=agent_context["call_queue"],
         result_queue=agent_context["result_queue"],
@@ -94,6 +96,7 @@ async def websocket_endpoint(websocket: WebSocket):
             response_id = int(asyncio.get_running_loop().time() * 1000)
             reasoning_id = f"reasoning-{response_id}"
             content_id = f"content-{response_id}"
+            tool_id = f"tool-{response_id}"
 
             # --- Part 1: Send the user's message bubble ---
             file_names = [] # Files are not handled via WebSocket form submission directly
@@ -129,7 +132,7 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_text(agent_bubble_start)
 
             # --- Part 3: Run the agent logic and stream responses ---
-            await agent_stream_logic(websocket, prompt, show_reasoning, reasoning_id, content_id, max_iterations)
+            await agent_stream_logic(websocket, prompt, show_reasoning, reasoning_id, content_id, tool_id, max_iterations)
 
     except WebSocketDisconnect:
         print("Client disconnected from WebSocket.")
@@ -139,10 +142,11 @@ async def websocket_endpoint(websocket: WebSocket):
         error_html = f'<div id="chat-messages" hx-swap-oob="beforeend" class="text-sm text-red-500">[WebSocket Error]: {e}</div>'
         await websocket.send_text(error_html)
 
-async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: bool, reasoning_id: str, content_id: str, max_iterations: int) -> None:
+async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: bool, reasoning_id: str, content_id: str, tool_id: str, max_iterations: int) -> None:
     """The main agent loop, now sending HTML directly over WebSocket."""
     # 1. Create the user message for this turn
-    user_message = create_message_with_files(prompt, [])
+
+    user_message = prompt
 
     # 2. Initialize the full message history for the agent,
     #    starting with the system prompt.
@@ -160,37 +164,24 @@ async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: 
     while not result_queue.empty():
         result_queue.get_nowait()
 
+
     try:
         for turn in range(max_iterations):
-            stream = async_client.chat.completions.create(messages=current_messages, tools=functions, stream=True)
-            had_tool_call_in_turn = False
-
-            async for event in parse_delta_enqueue_calls(stream, call_queue, show_reasoning):
-                event_type = event.get("type")
-                data = event.get("data")
-                html_chunk = ""
-
-                if event_type == "reasoning":
-                    html_chunk = f'<span hx-swap-oob="beforeend:#{reasoning_id}">{data.replace("\n", "<br>")}</span>'
-                elif event_type == "content":
-                    html_chunk = f'<span hx-swap-oob="beforeend:#{content_id}">{data.replace("\n", "<br>")}</span>'
-                elif event_type == "tool_call":
-                    had_tool_call_in_turn = True
-                    html_chunk = f'<div hx-swap-oob="beforeend:#{reasoning_id}" class="text-xs text-blue-400">[Tool Call: {data.get("name")}]</div>'
-                
-                if html_chunk:
-                    await websocket.send_text(html_chunk)
-
-            await call_queue.join()
-
-            if not had_tool_call_in_turn:
-                break
-
-            results = []
-            while not result_queue.empty():
-                results.append(await result_queue.get())
-            
-            current_messages.extend(results)
+            async with async_client.chat.completions.stream(messages=current_messages, model="Qwen3-0.6B", tools=AVAILABLE_TOOLS) as stream:
+                async for event in parse_delta_enqueue_calls(stream, call_queue):
+                    if event.type == "content.delta":
+                        html_chunk = f'<span hx-swap-oob="beforeend:#{content_id}">{event.content.replace("\\n", "<br>")}</span>'
+                        await websocket.send_text(html_chunk)
+                    elif event.type == "chunk":
+                        if reason := event.chunk.choices[0].delta.model_extra.get("reasoning_content"):
+                            html_chunk = f'<span hx-swap-oob="beforeend:#{reasoning_id}">{reason.replace("\\n", "<br>")}</span>'
+                            await websocket.send_text(html_chunk)
+                    elif event.type == "tool_calls.function.arguments.delta":
+                        print(f"Tool {event.name} called.")
+                        tool_result = await call_queue.get()
+                        current_messages.extend(tool_result)
+                    else:
+                         continue
 
     except Exception as e:
         error_html = f'<div hx-swap-oob="beforeend:#{content_id}" class="text-sm text-red-500">[Error]: {e}</div>'
@@ -199,3 +190,4 @@ async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: 
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=7860)
+            

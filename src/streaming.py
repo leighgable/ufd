@@ -13,6 +13,7 @@ model_cfg = {
     "api_key": "EMPTY",
 }
 
+
 async def function_worker_async(call_queue: asyncio.Queue,
     result_queue: asyncio.Queue):
     """Checks queue for function calls to execute, with corrected error handling.
@@ -42,149 +43,46 @@ async def function_worker_async(call_queue: asyncio.Queue,
                 await result_queue.put(execution_result)
             call_queue.task_done()
 
-# async def parse_and_enqueue_calls(response_stream: AsyncGenerator, call_queue: asyncio.Queue, show_reasoning: bool = False):
-#     """
-#     A robust parser that accumulates all tool call chunks throughout a stream
-#     and only enqueues the final, complete call at the very end.
-#     """
-#     accumulating_tool_call = None
-#     last_content = ""
-#     last_reasoning = ""
-
-#     # This first loop consumes the whole stream for this turn, yielding UI updates
-#     # and accumulating one single tool call object if it exists.
-#     async for message_list in response_stream:
-#         if not isinstance(message_list, list):
-#             continue
-        
-#         for message in message_list:
-#             msg_dict = message if isinstance(message, dict) else message.model_dump(exclude_none=True)
-
-#             # Part 1: Accumulate tool call chunks if they exist
-#             if is_tool_call_chunk := ('function_call' in msg_dict):
-#                 partial_tool_call = msg_dict['function_call']
-#                 if not accumulating_tool_call:
-#                     accumulating_tool_call = {"name": "", "arguments": ""}
-#                 if name_chunk := partial_tool_call.get('name'):
-#                     accumulating_tool_call['name'] += name_chunk
-#                 if args_chunk := partial_tool_call.get('arguments'):
-#                     accumulating_tool_call['arguments'] += args_chunk
-
-#             # Part 2: Process content stream (with diffing)
-#             if (content := msg_dict.get('content')) is not None:
-#                 if isinstance(content, str):
-#                     new_chunk = content[len(last_content):]
-#                     if new_chunk:
-#                         yield {"type": "content", "data": new_chunk}
-#                     last_content = content
-#                 elif isinstance(content, list):
-#                     for item in content:
-#                         if isinstance(item, (dict, ContentItem)) and (text := item.get('text')):
-#                             yield {"type": "content", "data": text}
-#                             break
-            
-#             # Part 3: Process reasoning stream (with diffing)
-#             if show_reasoning and (reasoning := msg_dict.get('reasoning_content')) is not None:
-#                 if isinstance(reasoning, str):
-#                     new_chunk = reasoning[len(last_reasoning):]
-#                     if new_chunk:
-#                         yield {"type": "reasoning", "data": new_chunk}
-#                     last_reasoning = reasoning
-#                 elif isinstance(reasoning, list):
-#                     for item in reasoning:
-#                         if isinstance(item, (dict, ContentItem)) and (text := item.get('text')):
-#                             yield {"type": "reasoning", "data": text}
-#                             break
-
-#     # After the entire stream for this turn is finished, if we have
-#     # built a tool call, we yield it for the UI and enqueue it for the worker.
-#     if accumulating_tool_call:
-#         yield {"type": "tool_call", "data": accumulating_tool_call}
-#         await call_queue.put(accumulating_tool_call)
-                        
-        
+    
 async def parse_delta_enqueue_calls(response_stream: AsyncGenerator,
-    call_queue: asyncio.Queue,
-    show_reasoning: bool = False
+    call_queue: asyncio.Queue
 ):
     """
     Parse ChoiceDelta stream from AsyncOpenAI stream and enqueue tool calls
     """
-    accumulated_tool_calls = []
-    async for chunk in response_stream:
-        if chunk.choices and chunk.choices[0].delta:
-            delta = chunk.choices[0].delta
-        else:
-            break
-        if content := delta.content and delta.content is not None:
-            yield {"type": "content", "data": content}
-            break
-        if reason := delta.model_extra.get("reasoning_content"):
-            yield {"type": "reasoning", "data": reason}
-            break
-        if delta.tool_calls:
-            for tc_chunk in delta.tool_calls:
-                tool_call_index = tc_chunk.index
-            while len(accumulated_tool_calls) <= tool_call_index:
-                accumulated_tool_calls.append({
-                                                  "id": "",
-                                                  "type": "function",
-                                                  "function": {"name": "",
-                                                               "arguments": ""},
-                                              })
-            # Get the existing tool call object to update
-            tc_object = accumulated_tool_calls[tool_call_index]
-
-            # Concatenate attributes from the chunk
-            if tc_chunk.id:
-                tc_object["id"] += tc_chunk.id
-            if tc_chunk.function.name:
-                tc_object["function"]["name"] += tc_chunk.function.name
-            if tc_chunk.function.arguments:
-                tc_object["function"]["arguments"] += tc_chunk.function.arguments
-            
-    # If the stream finishes and there are tool calls, execute them
-    if chunk.choices[0].finish_reason == "tool_calls":
-        print(f"\nStream finished. Accumulated tool calls: {len(accumulated_tool_calls)}")
-        print(json.dumps(accumulated_tool_calls, indent=2))
+    
+    async with response_stream as stream:
+        async for event in stream:
+            yield event
         
-        for tool_call in accumulated_tool_calls:
-            function_id = tool_call["id"]
-            function_name = tool_call["function"]["name"]
-            arguments_str = tool_call["function"]["arguments"]
+            if event.type == "tool_calls.function.arguments.delta":
+                tool_call_index = event.index
+                tool_name = event.name
+                arguments = event.arguments
 
-            try:
-                arguments = json.loads(arguments_str)
-                print(f"Tool execution result: {tool_call}")
-                yield {
-                        "type": "function",
-                        "id": function_id,
-                        "name": function_name,
-                        "data": arguments,
-                }
-                await call_queue.put({
-                                     "name": function_name,
-                                     "id": function_id,
-                                     "arguments": arguments
-                                 })
-            except json.JSONDecodeError:
-                print(f"Could not parse JSON arguments for tool call: {arguments_str}")
-                yield {
-                        "type": "tool_call",
-                        "id": function_id,
-                        "name": function_name,
-                        "arguments": f"Json decode error: {arguments_str}",
-                    }
-                
-            except Exception as e:
-                print(f"Error executing tool '{function_name}': {e}")
-                yield {
-                        "type": "tool_call",
-                        "id": function_id,
-                        "name": function_name,
-                        "arguments": f"Json decode error: {e}",
-                    }
+            elif event.type == "tool_calls.function.arguments.done":
+                try:
 
+                    arguments = json.loads(arguments)
+                    await call_queue.put({
+                                             "name": tool_name,
+                                             "id": tool_call_index,
+                                             "arguments": arguments
+                                         })                    
+            
+                except json.JSONDecodeError:
+                    print(f"Could not parse JSON arguments for tool call: {arguments}")
+                    await call_queue.put({
+                                         "name": tool_name,
+                                         "id": tool_call_index,
+                                         "arguments": {"error": f"JSON decode error: {arguments}"}})
+                except Exception as e:
+                    print(f"Error executing tool '{tool_name}': {e}")
+                    await call_queue.put({
+                                             "name": tool_name,
+                                             "id": tool_call_index,
+                                             "arguments": {"error": f"Error: {e}"}
+                                         })
 
 def call_function(tool_call: Dict[str, Any]) -> Dict[str, Any]:
 
@@ -251,7 +149,7 @@ async def main_agent_loop():
             # 4. Process the stream with the parser
             # The parser will yield content for the UI and put function calls on the queue
             print("Agent:", end="", flush=True)
-            async for event in parse_and_enqueue_calls(stream, call_queue):
+            async for event in parse_delta_enqueue_calls(stream, call_queue):
                 if isinstance(event, dict) and event.get('name'): # It's a function call
                     had_tool_call_in_turn = True
                     # Optional: print out tool calls as they are found

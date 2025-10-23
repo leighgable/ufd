@@ -25,20 +25,21 @@ def create_message_with_files(prompt: str,
         "role": "user",
         "content": prompt,
     }]
-    
+    file_list = []
     # Add a ContentItem for each file path
     for path in file_paths:
-        content_list.append({"file": path})
         print(f"[Message Creator] Adding file to message: {path}")
+        file_list.append({"file": path})
 
+    content_list.append({"role": "user", "content": "", "files": file_list})
     # Create a single Message object whose content is the list of parts
     user_message = {
         "role": "user",
-        "content": content_list
+        "content": content_list,
     }
     
     # Return the message inside a list, as the chat method expects
-    return [user_message]
+    return user_message
 
 def get_current_temperature(latitude, longitude):
     url = "https://api.open-meteo.com/v1/forecast"
