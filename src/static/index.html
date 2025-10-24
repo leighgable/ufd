@@ -164,7 +164,7 @@
         <!-- Chat messages will be swapped here -->
       </div>
       <div class="p-4 border-t border-gray-200 dark:border-gray-700 bg-background-light dark:bg-background-dark">
-        <form id="chat-form" ws-send hx-encoding="multipart/form-data"
+        <form id="chat-form" hx-encoding="multipart/form-data"
           hx-on::after-request="this.closest('form').querySelector('input[name=\'prompt\']').value = ''">
           <div class="flex items-center gap-3">
             <div
@@ -177,7 +177,8 @@
                 class="flex items-center justify-center p-2 text-gray-500 hover:text-primary dark:text-gray-400 dark:hover:text-white cursor-pointer">
                 <span class="material-symbols-outlined text-xl">attach_file</span>
               </label>
-              <button type="submit"
+              <button type="submit" ws-send
+                ws-vals="js:{prompt:this.closest('form').querySelector('input[name=\'prompt\']').value, show_reasoning: this.closest('form').querySelector('input[name=\'show_reasoning\']').checked ? 'true': 'false', max_iterations: this.closest('form').querySelector('input[name=\'max_iterations\']').value}"
                 class="flex items-center justify-center px-4 py-3 rounded-r-lg bg-primary text-white self-stretch -mr-px -my-px">
                 <span class="material-symbols-outlined text-xl">send</span>
               </button>

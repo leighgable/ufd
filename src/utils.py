@@ -18,28 +18,20 @@ react_instructions = dedent("""
 def create_message_with_files(prompt: str,
     file_paths: List[str]
 ) -> List[Dict]:
-    """ Creates a list containing a single user Message object. """
+    """ Creates a list containing a single user prompt with files. """
     
-    # Start a list of content parts, beginning with the text prompt
-    content_list = [{
-        "role": "user",
-        "content": prompt,
-    }]
-    file_list = []
-    # Add a ContentItem for each file path
+    content_parts = [{"type": "text", "text": prompt}]
+    
     for path in file_paths:
         print(f"[Message Creator] Adding file to message: {path}")
-        file_list.append({"file": path})
+        content_parts.append({"type": "text", "text": f"Attached file: {path}"})
 
-    content_list.append({"role": "user", "content": "", "files": file_list})
-    # Create a single Message object whose content is the list of parts
     user_message = {
         "role": "user",
-        "content": content_list,
+        "content": content_parts,
     }
     
-    # Return the message inside a list, as the chat method expects
-    return user_message
+    return [user_message]
 
 def get_current_temperature(latitude, longitude):
     url = "https://api.open-meteo.com/v1/forecast"

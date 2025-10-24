@@ -1,7 +1,8 @@
 import json
+import sys
 import asyncio
 from openai import AsyncOpenAI
-from typing import Dict, Any, AsyncGenerator
+from typing import Dict, Any, AsyncGenerator, Callable
 from .utils import (get_current_location,
     get_current_temperature,
     run_code_interpreter,
@@ -14,8 +15,10 @@ model_cfg = {
 }
 
 
-async def function_worker_async(call_queue: asyncio.Queue,
-    result_queue: asyncio.Queue):
+async def function_worker_async(function: Callable,
+    call_queue: asyncio.Queue,
+    result_queue: asyncio.Queue
+):
     """Checks queue for function calls to execute, with corrected error handling.
     """
     while True:
@@ -27,7 +30,9 @@ async def function_worker_async(call_queue: asyncio.Queue,
         execution_result = None
         try:
             print(f"[Worker] Executing: {function_call.get('name')}")
-            execution_result = call_function(**function_call)
+            
+            execution_result = await asyncio.to_thread(call_function,
+                                                    **function_call)
             
         except Exception as e:
             print(f"[Worker] Error during function execution: {e}")
@@ -87,26 +92,30 @@ async def parse_delta_enqueue_calls(response_stream: AsyncGenerator,
 def call_function(tool_call: Dict[str, Any]) -> Dict[str, Any]:
 
     fn_name = tool_call.get("name", "unknown_function")
-    fn_args = tool_call.get("arguments", "{}")
-    fn_id = tool_call.get("id", "missing_id")
+    try:
+        fn_args: dict = json.loads(tool_call.get("arguments", "{}"))
+        fn_id = tool_call.get("id", "missing_id")
 
-    # 1. Execute the tool to get the raw execution object
-    execution_result_obj = get_function_by_name(fn_name)(**fn_args)
+        execution_result_obj = get_function_by_name(fn_name)(**fn_args)
+        parsed_outputs = parse_sbx_exec(execution_result_obj)
+        content_str = json.dumps(parsed_outputs)
 
-    # 2. Parse the raw result into a structured list (text, images, etc.)
-    parsed_outputs = parse_sbx_exec(execution_result_obj)
-
-    # 3. For a "function" role, the content must be a simple string.
-    #    We will serialize the entire list of parsed outputs into a single JSON string.
-    content_str = json.dumps(parsed_outputs)
-
-    # 4. Return the message with the content formatted for the agent
-    return {
-        "role": "function",
-        "tool_call_id": fn_id,
-        "name": fn_name,
-        "content": content_str,
-    }
+        # 4. Return the message with the content formatted for the agent
+        return {
+            "role": "function",
+            "tool_call_id": fn_id,
+            "name": fn_name,
+            "content": content_str,
+        }
+    except Exception as e:
+        print(f"Error during tool call: {e}", file=sys.stderr)
+        error_content = json.dumps([{"type": "error", "detail": str(e)}])
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call.get("id", "error_id"),
+            "name": fn_name,
+            "content": error_content
+        }
 
 
 def get_function_by_name(name):

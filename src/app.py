@@ -1,5 +1,5 @@
 import asyncio
-import urllib.parse
+import json
 from textwrap import dedent
 from typing import Dict, Any
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -10,15 +10,20 @@ from openai import AsyncOpenAI
 # --- New Imports for the Async Agent ---
 from .streaming import (
     function_worker_async,
-    parse_delta_enqueue_calls,
+    call_function,
     model_cfg,
 )
+from .utils import create_message_with_files
 
 # --- Variables from old templates.py ---
-react_instructions = dedent("""
+react_instructions = {
+    "role": "system",
+    "content": dedent("""
         You are an expert with strong analytical skills! 🧠
-        Don't overthink your answers, and use your python tool to test your code.\n""")
-
+        You have access to tools. To call a tool, you make a function call with the function name and the arguments in JSON format.\n
+        **IMPORTANT**: Ensure the 'arguments' field is always a valid JSON string.
+        Don't overthink your answers, and use your python tool to test your code.""")
+}
 
 AVAILABLE_TOOLS = [
     {
@@ -42,8 +47,6 @@ AVAILABLE_TOOLS = [
     },
 ]
 
-functions = [tool["function"] for tool in AVAILABLE_TOOLS]
-
 # This will hold our persistent agent components
 agent_context: Dict[str, Any] = {}
 
@@ -59,6 +62,7 @@ async def startup_event():
     agent_context["result_queue"] = asyncio.Queue()
     agent_context["client"] = AsyncOpenAI(**model_cfg)
     agent_context["worker_task"] = asyncio.create_task(function_worker_async(
+        call_function,
         call_queue=agent_context["call_queue"],
         result_queue=agent_context["result_queue"],
     ))
@@ -84,9 +88,12 @@ async def websocket_endpoint(websocket: WebSocket):
     try:
         while True:
             message_data = await websocket.receive_text()
-            parsed_data = urllib.parse.parse_qs(message_data)
+            print(f"[Debug_WS] Raw message_data recieved: {message_data!r}")
+            parsed_data = json.loads(message_data)
             
-            prompt = parsed_data.get("prompt", [""])[0]
+            print(f"[Debug_WS] Parsed data: {parsed_data!r}")
+            prompt = parsed_data.get("prompt", [""])
+            print(f"[Debug_WS] Extracted prompt: {prompt!r}")
             show_reasoning_str = parsed_data.get("show_reasoning", ["false"])[0]
             max_iterations_str = parsed_data.get("max_iterations", ["5"])[0]
 
@@ -144,44 +151,75 @@ async def websocket_endpoint(websocket: WebSocket):
 
 async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: bool, reasoning_id: str, content_id: str, tool_id: str, max_iterations: int) -> None:
     """The main agent loop, now sending HTML directly over WebSocket."""
-    # 1. Create the user message for this turn
 
-    user_message = prompt
-
-    # 2. Initialize the full message history for the agent,
-    #    starting with the system prompt.
-    current_messages = [{
-        "role": "system", "content": react_instructions
-    }]
+    user_message = create_message_with_files(prompt, [])
+    
+    current_messages = [react_instructions]
+    
     current_messages.extend(user_message)
     
     async_client = agent_context["client"]
     call_queue = agent_context["call_queue"]
     result_queue = agent_context["result_queue"]
+    # async_worker = agent_context["worker_task"]
 
     while not call_queue.empty():
         call_queue.get_nowait()
     while not result_queue.empty():
         result_queue.get_nowait()
 
-
     try:
         for turn in range(max_iterations):
             async with async_client.chat.completions.stream(messages=current_messages, model="Qwen3-0.6B", tools=AVAILABLE_TOOLS) as stream:
-                async for event in parse_delta_enqueue_calls(stream, call_queue):
+                had_tool_call = False
+                current_tool_calls = {}
+                answer = ""
+                async for event in stream:
                     if event.type == "content.delta":
-                        html_chunk = f'<span hx-swap-oob="beforeend:#{content_id}">{event.content.replace("\\n", "<br>")}</span>'
+                        html_chunk = f'<span hx-swap-oob="beforeend:#{content_id}">{event.delta.replace("\\n", "<br>")}</span>'
                         await websocket.send_text(html_chunk)
+                    elif event.type == "content.done":
+                        answer = event.content        
                     elif event.type == "chunk":
-                        if reason := event.chunk.choices[0].delta.model_extra.get("reasoning_content"):
-                            html_chunk = f'<span hx-swap-oob="beforeend:#{reasoning_id}">{reason.replace("\\n", "<br>")}</span>'
-                            await websocket.send_text(html_chunk)
-                    elif event.type == "tool_calls.function.arguments.delta":
-                        print(f"Tool {event.name} called.")
-                        tool_result = await call_queue.get()
-                        current_messages.extend(tool_result)
+                        finish_reason = event.chunk.choices[0].finish_reason
+                        if reason := event.chunk.choices[0].delta.model_extra.get('reasoning_content'):
+                            if reason is not None: # put show_reason back
+                                html_chunk = f'<span hx-swap-oob="beforeend:#{reasoning_id}">{reason.replace("\\n", "<br>")}</span>'
+                                await websocket.send_text(html_chunk)
+                    elif event.type == "tool_calls.function.arguments.done":
+                        tool_call_name = getattr(event, 'name', None)
+                        if tool_call_name:
+                            had_tool_call = True
+                            tool_update = f'<div hx-swap-oob="beforeend:#{tool_id}" class=f"text-xs text-blue-400">[{tool_call_name} call in queue.]</div>'
+                            current_tool_calls[tool_id] = {
+                                "id": tool_id,
+                                "function": {"name": event.name, "arguments": event.arguments}
+                            }
+                            await websocket.send_text(tool_update)
+                            await call_queue.put({"name": event.name,
+                                                 "id": tool_id,
+                                             "arguments": event.arguments,
+                                         })
                     else:
-                         continue
+                        pass
+                    if finish_reason:
+                        if had_tool_call:
+                            current_messages.append({"role": "assistant", "tool_calls": list(current_tool_calls.values())})
+                            await call_queue.join()
+
+                            tool_results = []
+
+                            while not result_queue.empty():
+                                result = await result_queue.get()
+                                tool_results.append(result)
+                                result_queue.task_done()        
+                            
+                            current_messages.extend(tool_results)
+                            break                
+                    
+                        elif finish_reason == "stop":
+                            current_messages.append({"role": "assistant", "content": answer})
+                            return
 
     except Exception as e:
         error_html = f'<div hx-swap-oob="beforeend:#{content_id}" class="text-sm text-red-500">[Error]: {e}</div>'
