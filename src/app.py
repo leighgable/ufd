@@ -1,8 +1,15 @@
+import os
+import shutil
 import asyncio
 import json
 from textwrap import dedent
-from typing import Dict, Any
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from typing import Dict, Any, List
+from fastapi import (FastAPI,
+    WebSocket,
+    WebSocketDisconnect,
+    UploadFile,
+    File,
+)
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from openai import AsyncOpenAI
@@ -82,20 +89,31 @@ async def shutdown_event():
 async def get_index():
     return FileResponse("src/static/index.html")
 
+@app.post("/upload-file")
+async def upload_file(file: UploadFile = File(...)):
+    """Handles file uploads and saves them to /tmp"""
+    try:
+        os.makedirs("tmp", exist_ok=True)
+        file_location = f"tmp/{file.filename}"
+        with open(file_location, "wb") as buffer:
+            shutil.copyfileobj(file.file, buffer)
+        return {"filename": file.filename, "path": file_location, "message": "File uploaded successfully"}
+    except Exception as e:
+        return {"message": f"There was an error uploading the file: {e}"}
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     try:
         while True:
             message_data = await websocket.receive_text()
-            print(f"[Debug_WS] Raw message_data recieved: {message_data!r}")
             parsed_data = json.loads(message_data)
             
-            print(f"[Debug_WS] Parsed data: {parsed_data!r}")
             prompt = parsed_data.get("prompt", [""])
-            print(f"[Debug_WS] Extracted prompt: {prompt!r}")
             show_reasoning_str = parsed_data.get("show_reasoning", ["false"])[0]
             max_iterations_str = parsed_data.get("max_iterations", ["5"])[0]
+
+            uploaded_file_paths = parsed_data.get("uploaded_file_paths", [])
 
             show_reasoning = show_reasoning_str in ["true", "on"]
             max_iterations = int(max_iterations_str)
@@ -105,15 +123,15 @@ async def websocket_endpoint(websocket: WebSocket):
             content_id = f"content-{response_id}"
             tool_id = f"tool-{response_id}"
 
-            # --- Part 1: Send the user's message bubble ---
-            file_names = [] # Files are not handled via WebSocket form submission directly
-            file_list_html = ""
-            # This block will currently not execute as file_names is empty
-            if file_names: 
-                items = "".join([f"<li>{name}</li>" for name in file_names])
-                file_list_html = f"<div class='file-list'>Attached:<ul>{items}</ul></div>"
+            # # --- Part 1: Send the user's message bubble ---
+            # file_names = [] # Files are not handled via WebSocket form submission directly
+            # file_list_html = ""
+            # # This block will currently not execute as file_names is empty
+            # if file_names: 
+            #     items = "".join([f"<li>{name}</li>" for name in file_names])
+            #     file_list_html = f"<div class='file-list'>Attached:<ul>{items}</ul></div>"
             
-            display_prompt = prompt + file_list_html
+            display_prompt = prompt         # file_list_html
             user_bubble = f'''
                 <div hx-swap-oob="beforeend:#chat-messages">
                     <div class="flex justify-end">
@@ -139,7 +157,7 @@ async def websocket_endpoint(websocket: WebSocket):
             await websocket.send_text(agent_bubble_start)
 
             # --- Part 3: Run the agent logic and stream responses ---
-            await agent_stream_logic(websocket, prompt, show_reasoning, reasoning_id, content_id, tool_id, max_iterations)
+            await agent_stream_logic(websocket, prompt, show_reasoning, reasoning_id, content_id, tool_id, max_iterations, uploaded_file_paths)
 
     except WebSocketDisconnect:
         print("Client disconnected from WebSocket.")
@@ -149,7 +167,7 @@ async def websocket_endpoint(websocket: WebSocket):
         error_html = f'<div id="chat-messages" hx-swap-oob="beforeend" class="text-sm text-red-500">[WebSocket Error]: {e}</div>'
         await websocket.send_text(error_html)
 
-async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: bool, reasoning_id: str, content_id: str, tool_id: str, max_iterations: int) -> None:
+async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: bool, reasoning_id: str, content_id: str, tool_id: str, max_iterations: int, uploaded_file_paths: List[str]) -> None:
     """The main agent loop, now sending HTML directly over WebSocket."""
 
     user_message = create_message_with_files(prompt, [])

@@ -163,7 +163,8 @@
       <div id="chat-messages" class="flex-1 overflow-y-auto p-6 space-y-6">
         <!-- Chat messages will be swapped here -->
       </div>
-      <div class="p-4 border-t border-gray-200 dark:border-gray-700 bg-background-light dark:bg-background-dark">
+      <div id="uploaded-files-container" style="display:none;"></div>
+        class="p-4 border-t border-gray-200 dark:border-gray-700 bg-background-light dark:bg-background-dark">
         <form id="chat-form" hx-encoding="multipart/form-data"
           hx-on::after-request="this.closest('form').querySelector('input[name=\'prompt\']').value = ''">
           <div class="flex items-center gap-3">
@@ -172,7 +173,9 @@
               <input name="prompt"
                 class="form-input w-full min-w-0 flex-1 resize-none overflow-hidden bg-transparent text-gray-900 dark:text-gray-100 focus:outline-none focus:ring-0 border-none h-full placeholder:text-gray-500 dark:placeholder:text-gray-400 px-4 text-base"
                 placeholder="Type a message..." required />
-              <input type="file" name="files" multiple class="hidden" id="file-upload" />
+              <input type="file" name="files" multiple class="hidden" id="file-upload" hx-post="/upload-file"
+                hx-target="#uploaded-files-container" hx-swap="beforeend"
+                hx-on::change="htmx.trigger(this, 'change')" />
               <label for="file-upload"
                 class="flex items-center justify-center p-2 text-gray-500 hover:text-primary dark:text-gray-400 dark:hover:text-white cursor-pointer">
                 <span class="material-symbols-outlined text-xl">attach_file</span>

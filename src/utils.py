@@ -17,13 +17,13 @@ react_instructions = dedent("""
 
 def create_message_with_files(prompt: str,
     file_paths: List[str]
-) -> List[Dict]:
+) -> List[Dict[str, Any]]:
     """ Creates a list containing a single user prompt with files. """
     
     content_parts = [{"type": "text", "text": prompt}]
     
     for path in file_paths:
-        print(f"[Message Creator] Adding file to message: {path}")
+        print(f"[Message Creator] Adding file(s) to message: {path}")
         content_parts.append({"type": "text", "text": f"Attached file: {path}"})
 
     user_message = {

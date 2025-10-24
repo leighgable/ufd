@@ -84,6 +84,7 @@ async def parse_delta_enqueue_calls(response_stream: AsyncGenerator,
                 except Exception as e:
                     print(f"Error executing tool '{tool_name}': {e}")
                     await call_queue.put({
+                                             "type": "function",
                                              "name": tool_name,
                                              "id": tool_call_index,
                                              "arguments": {"error": f"Error: {e}"}
@@ -95,6 +96,7 @@ def call_function(tool_call: Dict[str, Any]) -> Dict[str, Any]:
     try:
         fn_args: dict = json.loads(tool_call.get("arguments", "{}"))
         fn_id = tool_call.get("id", "missing_id")
+        fn_type = tool_call.get("type", "function")
 
         execution_result_obj = get_function_by_name(fn_name)(**fn_args)
         parsed_outputs = parse_sbx_exec(execution_result_obj)
@@ -102,6 +104,7 @@ def call_function(tool_call: Dict[str, Any]) -> Dict[str, Any]:
 
         # 4. Return the message with the content formatted for the agent
         return {
+            "type": fn_type,
             "role": "function",
             "tool_call_id": fn_id,
             "name": fn_name,
@@ -111,6 +114,7 @@ def call_function(tool_call: Dict[str, Any]) -> Dict[str, Any]:
         print(f"Error during tool call: {e}", file=sys.stderr)
         error_content = json.dumps([{"type": "error", "detail": str(e)}])
         return {
+            "type": fn_type,
             "role": "tool",
             "tool_call_id": tool_call.get("id", "error_id"),
             "name": fn_name,
