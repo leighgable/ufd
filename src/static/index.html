@@ -13,6 +13,60 @@
   <!-- HTMX scripts -->
   <script src="https://unpkg.com/htmx.org@1.9.10"></script>
   <script src="https://unpkg.com/htmx.org/dist/ext/ws.js"></script>
+  <!-- <script> htmx.logAll() </script> -->
+  <script>
+    function finalizeAndClear(event) {
+      const form = event.target;
+
+      const promptInput = form.querySelector('input[name="prompt"]');
+      const reasoningCheckbox = document.querySelector('input[name="show_reasoning"]');
+      const iterationsInput = document.querySelector('input[name="max_iterations"]').value;
+      const fileInput = form.querySelector('input[name="files"]');
+      const uploadFilesContainer = document.getElementById('uploaded-files-container');
+
+      console.log('--- SUCCESS: htmx:wsConfigSend Fired. Clearing Form. ---');
+
+      const promptValue = promptInput ? promptInput.value : '';
+
+      let showReasoning = reasoningCheckbox ? (reasoningCheckbox.checked ? 'true' : 'false') : 'false';
+
+      let maxIterations = iterationsInput ? iterationsInput.value : '';
+
+      const uploadedFiles = uploadFilesContainer.querySelectorAll('input[name="uploaded_file_paths"]');
+      const filePaths = Array.from(uploadedFiles).map(input => input.value);
+
+      // The data that htmx is about to send is in event.detail.parameters
+      // We override this with the complex data structure we need
+      event.detail.parameters = {
+        prompt: promptValue,
+        show_reasoning: showReasoning,
+        max_iterations: maxIterations,
+        uploaded_file_paths: filePaths
+      };
+
+      if (promptInput) {
+        promptInput.value = '';
+        promptInput.focus();
+      }
+      if (fileInput) {
+        fileInput.value = '';
+      }
+      if (uploadedFilesContainer) {
+        uploadedFilesContainer.innerHTML = '';
+        uploadedFilesContainer.style.display = 'none';
+      }
+    }
+
+    document.addEventListener("DOMContentLoaded", function () {
+      const chatForm = document.getElementById('chat-form');
+      if (chatForm) {
+        // This event allows modification of the payload AND execution of commands
+        chatForm.addEventListener('htmx:wsConfigSend', finalizeAndClear);
+        console.log('Payload/Clear listener attached.');
+      }
+    });
+
+  </script>
   <script>
     tailwind.config = {
       darkMode: "class",
@@ -60,6 +114,25 @@
       display: -webkit-box;
       -webkit-box-orient: vertical;
       -webkit-line-clamp: 3;
+    }
+  </style>
+  <style>
+    #progress-bar {
+      width: 100%;
+      background: #eee;
+      height: 24px;
+      border-radius: 4px;
+      overflow: hidden;
+    }
+
+    #progress-bar>div {
+      height: 100%;
+      background: #3b82f6;
+      width: 0%;
+      color: white;
+      text-align: center;
+      line-height: 24px;
+      transition: width 0.2s;
     }
   </style>
   <script>
@@ -124,7 +197,7 @@
         </nav>
       </div>
     </aside>
-    <main class="flex-1 flex flex-col" hx-ext="ws" ws-connect="/ws" ws-swap="none">
+    <main class="flex-1 flex flex-col" hx-ext="ws" ws-connect="/ws" ws-swap="afterend" hx-target="#chat-messages">
       <header
         class="flex items-center justify-between p-4 border-b border-gray-200 dark:border-gray-700 bg-background-light dark:bg-background-dark">
         <div class="flex items-center gap-6">
@@ -164,9 +237,8 @@
         <!-- Chat messages will be swapped here -->
       </div>
       <div id="uploaded-files-container" style="display:none;"></div>
-        class="p-4 border-t border-gray-200 dark:border-gray-700 bg-background-light dark:bg-background-dark">
-        <form id="chat-form" hx-encoding="multipart/form-data"
-          hx-on::after-request="this.closest('form').querySelector('input[name=\'prompt\']').value = ''">
+      <div class="p-4 border-t border-gray-200 dark:border-gray-700 bg-background-light dark:bg-background-dark">
+        <form id="chat-form" hx-encoding="multipart/form-data" ws-send>
           <div class="flex items-center gap-3">
             <div
               class="flex-1 flex items-center bg-white dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-600 focus-within:border-primary focus-within:ring-1 focus-within:ring-primary">
@@ -180,8 +252,13 @@
                 class="flex items-center justify-center p-2 text-gray-500 hover:text-primary dark:text-gray-400 dark:hover:text-white cursor-pointer">
                 <span class="material-symbols-outlined text-xl">attach_file</span>
               </label>
-              <button type="submit" ws-send
-                ws-vals="js:{prompt:this.closest('form').querySelector('input[name=\'prompt\']').value, show_reasoning: this.closest('form').querySelector('input[name=\'show_reasoning\']').checked ? 'true': 'false', max_iterations: this.closest('form').querySelector('input[name=\'max_iterations\']').value}"
+              <div id="upload-progress-bar-container"
+                class="w-full bg-gray-200 rounded-full h-2.5 dark:bg-gray-700 hidden">
+                <div id="upload-progress-bar" class="bg-blue-600 h-2.5 rounded-full" style="width: 0%"></div>
+              </div>
+              <div id="uploaded-files-list" class="text-xs text-gray-600 dark:text-gray-300 mt-1"></div>
+
+              <button type="submit"
                 class="flex items-center justify-center px-4 py-3 rounded-r-lg bg-primary text-white self-stretch -mr-px -my-px">
                 <span class="material-symbols-outlined text-xl">send</span>
               </button>

@@ -12,15 +12,6 @@
       inherit (nixpkgs) lib;
       forAllSystems = lib.genAttrs lib.systems.flakeExposed;
 
-      qwenModel = system:
-        let pkgs = nixpkgs.legacyPackages.${system}; in
-        pkgs.fetchurl {
-          # Find the raw URL for your GGUF file on Hugging Face.
-          url = "https://huggingface.co/unsloth/Qwen3-4B-GGUF/resolve/main/Qwen3-4B-UD-Q8_K_XL.gguf"; 
-          sha256 = "93bc18247eac98a8265c80c78b1322a96cc9c83218351f5a6922fb9e6f8fb242"; 
-          name = "Qwen3-4B-UD-Q8_K_XL.gguf";
-        };
-      
       systemConfigurations = system:
         let
           pkgs = nixpkgs.legacyPackages.${system};
@@ -29,6 +20,8 @@
             useVulkan = true;
             postPatch = '''';
           });
+          # llama-cpp-cuda = llama_package.overrideAttrs (old: {
+          # })
           pythonEnv = pkgs.python3.withPackages (p: [
             p.ipython
           ]);
@@ -62,11 +55,16 @@
               # create a startup script
               cat > $out/bin/start-server << EOF
               #!${pkgs.stdenv.shell}
+              if [ -z "$MODEL_PATH" ]; then
+                echo "Error: MODEL_PATH environment variable is not set."
+                echo "Please set it to the path of the model file."
+                exit 1
+              fi
 
               echo "Starting llama-server backend on port 8080..."
 
               $LLAMA_SERVER_EXEC \
-                -m ${qwenModel system}/Qwen3-4B-UD-Q8_K_XL.gguf \
+                -m "$MODEL_PATH" \
                 --jinja \
                 --reasoning-format deepseek \
                 --temp 0.6 \

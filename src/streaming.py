@@ -1,19 +1,22 @@
+import httpx
 import json
 import sys
 import asyncio
-from openai import AsyncOpenAI
-from typing import Dict, Any, AsyncGenerator, Callable
+from typing import Dict, Any, Callable, List, AsyncGenerator
 from .utils import (get_current_location,
     get_current_temperature,
     run_code_interpreter,
     parse_sbx_exec,
+    create_message_with_files,
 )
+MODEL_NAME = "qwen3-0.6B"
 
-model_cfg = {
-    "base_url": "http://localhost:8080/v1",
+client_cfg = {
+    "model_name": MODEL_NAME,
+    "base_url": "http://localhost:8080/v1/chat/completions",
+    "system_prompt": None,
     "api_key": "EMPTY",
 }
-
 
 async def function_worker_async(function: Callable,
     call_queue: asyncio.Queue,
@@ -22,105 +25,62 @@ async def function_worker_async(function: Callable,
     """Checks queue for function calls to execute, with corrected error handling.
     """
     while True:
-        function_call = await call_queue.get()
-        if function_call is None:
+        call_data = await call_queue.get()
+        if call_data is None:
             print("[Worker] Sentinel value received. Shutting down.")
             break
+        tool_call = call_data.get("tool_call")
+        files = call_data.get("files")
+        session_id = call_data.get("session_id")
         
         execution_result = None
         try:
-            print(f"[Worker] Executing: {function_call.get('name')}")
+            print(f"[Worker] Executing: {tool_call.get('name')}")
             
-            execution_result = await asyncio.to_thread(call_function,
-                                                    **function_call)
-            
+            execution_result = await asyncio.to_thread(function,
+                                                        tool_call,
+                                                        files=files,
+                                                        session_id=session_id)
+            print(f"EXEC: {execution_result}")
         except Exception as e:
             print(f"[Worker] Error during function execution: {e}")
-            execution_result = {
-                "role": "function",
-                "name": function_call.get("name", "unknown_function"),
-                "content": f"Error: An exception occurred while executing the tool: {e}",
-            }
         finally:
-            # This block now correctly ensures that for every item,
-            # we ALWAYS put a result back and mark the task as done, exactly once.
             if execution_result:
                 await result_queue.put(execution_result)
             call_queue.task_done()
 
-    
-async def parse_delta_enqueue_calls(response_stream: AsyncGenerator,
-    call_queue: asyncio.Queue
-):
-    """
-    Parse ChoiceDelta stream from AsyncOpenAI stream and enqueue tool calls
-    """
-    
-    async with response_stream as stream:
-        async for event in stream:
-            yield event
-        
-            if event.type == "tool_calls.function.arguments.delta":
-                tool_call_index = event.index
-                tool_name = event.name
-                arguments = event.arguments
+def call_function(tool_call: Dict[str, Any],
+    files: List[Dict[str, Any]] = None,
+    session_id: str = None,
+) -> Dict[str, Any]:
 
-            elif event.type == "tool_calls.function.arguments.done":
-                try:
-
-                    arguments = json.loads(arguments)
-                    await call_queue.put({
-                                             "name": tool_name,
-                                             "id": tool_call_index,
-                                             "arguments": arguments
-                                         })                    
-            
-                except json.JSONDecodeError:
-                    print(f"Could not parse JSON arguments for tool call: {arguments}")
-                    await call_queue.put({
-                                         "name": tool_name,
-                                         "id": tool_call_index,
-                                         "arguments": {"error": f"JSON decode error: {arguments}"}})
-                except Exception as e:
-                    print(f"Error executing tool '{tool_name}': {e}")
-                    await call_queue.put({
-                                             "type": "function",
-                                             "name": tool_name,
-                                             "id": tool_call_index,
-                                             "arguments": {"error": f"Error: {e}"}
-                                         })
-
-def call_function(tool_call: Dict[str, Any]) -> Dict[str, Any]:
-
-    fn_name = tool_call.get("name", "unknown_function")
+    fn_name = tool_call.get("function", {}).get("name", "unknown")
     try:
-        fn_args: dict = json.loads(tool_call.get("arguments", "{}"))
+        fn_args: dict = json.loads(tool_call.get("function", "{}").get("arguments", "{}"))
         fn_id = tool_call.get("id", "missing_id")
-        fn_type = tool_call.get("type", "function")
-
+        
+        if fn_name == "run_code_interpreter":
+            fn_args['files'] = files
+            fn_args['session_id'] = session_id
+            
+        print(f"ARGS TYPE: {type(fn_args)}")
         execution_result_obj = get_function_by_name(fn_name)(**fn_args)
         parsed_outputs = parse_sbx_exec(execution_result_obj)
         content_str = json.dumps(parsed_outputs)
 
         # 4. Return the message with the content formatted for the agent
         return {
-            "type": fn_type,
-            "role": "function",
+            "role": "tool",
             "tool_call_id": fn_id,
-            "name": fn_name,
             "content": content_str,
         }
     except Exception as e:
         print(f"Error during tool call: {e}", file=sys.stderr)
-        error_content = json.dumps([{"type": "error", "detail": str(e)}])
         return {
-            "type": fn_type,
             "role": "tool",
-            "tool_call_id": tool_call.get("id", "error_id"),
-            "name": fn_name,
-            "content": error_content
+            "tool_call_id": tool_call.get("id", "missing"),
+            "content": f"Error executing tool: {e}",
         }
-
 
 def get_function_by_name(name):
     if name == "run_code_interpreter":
@@ -132,69 +92,82 @@ def get_function_by_name(name):
     else:
         return None
 
-async def main_agent_loop():
-    """Main agent loop orchestrating the client, parser, and worker.
+async def astream_llama_cpp_response(
+    messages: List[Dict[str, Any]] = None,
+    tools: List = None,
+    files: List[str] = None,
+    client_cfg: Dict = None
+) -> AsyncGenerator[Dict[str, Any], None]:
     """
-    MAX_TURNS = 5
-    print("--- Starting Agent Loop ---")
+    Makes an asynchronous streaming request to the llama.cpp server using httpx.
+    This is non-blocking. Parses qwen3-style xml tool calls.
+    """
 
-    # 1. Initialize client, queues, and the background worker task
-    async_client = AsyncOpenAI(**model_cfg)
-    call_queue = asyncio.Queue()
-    result_queue = asyncio.Queue()
-    worker_task = asyncio.create_task(function_worker_async(
-        call_queue=call_queue, result_queue=result_queue
-    ))
+    payload = { "stream": True }
+    if tools:
+        payload['tools'] = tools
+    if model_name := client_cfg.get('model_name', "default"):
+        payload['model'] = model_name
+    if messages:
+        payload["messages"] = messages
+    if files:
+        payload["messages"] = create_message_with_files(messages)
 
-    # 2. Start with the initial user prompt
-    # Using the templates.py file for the initial prompt
-    current_messages = messages
-    print(f"Initial Prompt: {current_messages[-1]['content']}")
+    headers = {
+        "Content-Type": "application/json",
+    }
+    
+    async with httpx.AsyncClient(timeout=30) as client:
+        try:
+            async with client.stream("POST", client_cfg['base_url'], headers=headers, json=payload) as response:
+                response.raise_for_status() # Raise exception for bad status codes (4xx or 5xx)
+                buffer = ""
+                async for line in response.aiter_lines():
+                    if line.strip().startswith("data:"):
+                        try:
+                            data_str = line.split("data:", 1)[1].strip()
+                            if data_str == "[DONE]":
+                                break
+                            
+                            # yield json.loads(data_str)
+                            chunk = json.loads(data_str)
+                            content = chunk.get("choices", [{}])[0].get("delta", {}).get("content")
+                            if content:
+                                buffer += content
+                            if "<tool_call>" in buffer and "</tool_call>" in buffer:
+                                start_index = buffer.find("<tool_call>")
+                                end_index = buffer.find("</tool_call>") + len("</tool_call>")
+                                tool_call_str = buffer[start_index:end_index]
+                                json_str = tool_call_str.replace("<tool_call>", "").replace("</tool_call>", "").strip()
+                                try:
+                                    tool_call_json = json.loads(json_str)
+                                    tool_call_event = {
+                                        "choices": [{
+                                            "delta": {
+                                                "tool_calls": [{
+                                                    "id": f"call_{hash(json_str)}",
+                                                    "type": "function",
+                                                    "function": {
+                                                        "name": tool_call_json.get("name"),
+                                                        "arguments": json.dumps(tool_call_json.get("arguments", {}))
+                                                    }
+                                                }]
+                                            }
+                                        }]
+                                    }
+                                    yield tool_call_event
+                                    buffer = buffer[end_index:]
+                                except json.JSONDecodeError:
+                                    pass
+                            yield chunk
+                            
+                        except json.JSONDecodeError:
+                            continue
+                        except Exception as e:
+                            print(f"\n[An unexpected error occurred during stream processing: {e}]")
+                            break
 
-    try:
-        for turn in range(MAX_TURNS):
-            print(f"\n--- Turn {turn + 1} ---")
-            had_tool_call_in_turn = False
-
-            # 3. Get the async stream from the client
-            stream = async_client.chat(messages=current_messages, functions=functions)
-
-            # 4. Process the stream with the parser
-            # The parser will yield content for the UI and put function calls on the queue
-            print("Agent:", end="", flush=True)
-            async for event in parse_delta_enqueue_calls(stream, call_queue):
-                if isinstance(event, dict) and event.get('name'): # It's a function call
-                    had_tool_call_in_turn = True
-                    # Optional: print out tool calls as they are found
-                    print(f"\n[Tool Call Found: {event.get('name')}]", end="", flush=True)
-                elif isinstance(event, str):
-                    # This is content from the model
-                    print(event, end="", flush=True)
-            print() # for a newline
-
-            # 5. Wait for the worker to execute all functions found in this turn
-            await call_queue.join()
-
-            # 6. Check if any tools were called. If not, the agent is done.
-            if not had_tool_call_in_turn:
-                print("\n--- Final Answer Received --- ")
-                break
-
-            # 7. Gather results and feed them back to the model
-            results = []
-            while not result_queue.empty():
-                results.append(await result_queue.get())
-            
-            print(f"\n--- Feeding back {len(results)} tool results ---")
-            current_messages.extend(results)
-        else:
-            print("\n--- Max turns reached --- ")
-
-    except Exception as e:
-        print(f"\n[Error in main loop]: {e}")
-    finally:
-        # 8. Gracefully shut down the worker
-        print("\n--- Shutting down worker ---")
-        await call_queue.put(None)
-        await worker_task
-
+        except httpx.RequestError as e:
+            print(f"\n[Request Error: Could not connect to the server or request failed. Ensure llama.cpp is running at {client_cfg['base_url']}]")
+            print(f"Details: {e}")
+            yield None

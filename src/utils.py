@@ -1,6 +1,7 @@
 from textwrap import dedent
 import os
 import requests
+from .sandbox_manager import get_sandbox
 from typing import Any, List, Dict
 from e2b_code_interpreter import Sandbox
 from typing import Optional
@@ -16,7 +17,7 @@ react_instructions = dedent("""
         # Only when you are finished respond with 'Final Answer:'""")
 
 def create_message_with_files(prompt: str,
-    file_paths: List[str]
+    file_paths: List[str],
 ) -> List[Dict[str, Any]]:
     """ Creates a list containing a single user prompt with files. """
     
@@ -54,13 +55,14 @@ def edit_dir_str(files: list[dict[str, Any]],
     return [{"path": dirname + x["path"].split("/")[-1], "data": x["data"]} for x in files]
 
 def run_code_interpreter(code: str,
-        files: Optional[list[dict[str, Any]]] = None
+        files: Optional[list[dict[str, Any]]] = None,
+        session_id: str = None,
 ) -> str:
     """
     Calling the actual code execution environment (e.g., E2B).
     Returns a result string simulating stdout/stderr.
     """
-    sbx = Sandbox.create(api_key=e2b_key, timeout=1800)
+    sbx = get_sandbox(session_id)
     if files:
         sbx.files.write(edit_dir_str(files=files))        
     execution = sbx.run_code(code)

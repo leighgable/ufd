@@ -26,7 +26,6 @@ Agentic AI for the Masses!
 
 ### Built With
 
-* [Agno](https://github.com/agno-agi/agno/tree/main)
 * [llama.cpp](https://github.com/ggml-org/llama.cpp?tab=readme-ov-file#readme)
 * [FastAPI](https://fastapi.tiangolo.com/)
 * [HTMX](https://htmx.org/)
@@ -39,7 +38,7 @@ If you have the Nix package manager, you can simply clone this repo, cd into the
 
 ### Prerequisites
 
-This project uses llama.cpp, specifically llama-server. Also Agno and fastAPI. See the requirements.txt for all the (python) dependencies.
+This project uses llama.cpp, specifically llama-server. Also fastAPI. See the requirements.txt for all the (python) dependencies.
 
 ### Installation
 
