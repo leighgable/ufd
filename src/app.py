@@ -3,7 +3,6 @@ import shutil
 import asyncio
 import json
 from textwrap import dedent
-from markdown_it import MarkdownIt
 from typing import Dict, Any, List
 from fastapi import (FastAPI,
     WebSocket,
@@ -11,6 +10,7 @@ from fastapi import (FastAPI,
     UploadFile,
     File,
 )
+
 from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 # from openai import AsyncOpenAI
@@ -20,6 +20,7 @@ from .streaming import (
     call_function,
     astream_llama_cpp_response,
     client_cfg,
+    MarkdownBufferProcessor,
 )
 from .utils import create_message_with_files
 from .sandbox_manager import close_sandbox
@@ -243,196 +244,80 @@ async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: 
 
     content_id = f"content-{response_id}"
     reasoning_id = f"reasoning-{response_id}"
+
+    next_turn_messages = []
     
     try:
         for turn in range(max_iterations):
             print(f"----TURN: {turn} ----")
+            current_messages.extend(next_turn_messages)
+            next_turn_messages.clear()
+            print(f"----- CURRENT_MESSAGES: {current_messages}")
             stream = astream_llama_cpp_response(messages=current_messages, tools=AVAILABLE_TOOLS, client_cfg=client_cfg)
-            had_tool_call = False
-            tool_id = None
-            tool_call = None
-            answer = ""
-            reasoning_content = ""
-            arguments_buffer = ""
-            finish_reason = None
+            
+            content_buffer = ""
+            reasoning_buffer = ""
+            
             async for event in stream:
-                if event is None:
+                if not event or not event[0]:
                     continue
-                if not event.get("choices") or not event["choices"][0].get("delta"):
-                    continue
-                choices = event.get("choices")
-                if not choices:
-                    continue
-                first_choice = choices[0]
-                delta = first_choice.get("delta")
-                if not delta:
-                    continue
-                if first_choice.get("finish_reason"):
-                    finish_reason = first_choice["finish_reason"]
-                    
-                content = delta.get("content")
-                if content:
-                    html_chunk = f'<span hx-swap-oob="beforeend:#{content_id}">{content.replace("\\n", "<br>")}</span>'
-                    # content_buffer += content
-                    # rendered_html = md.render(content_buffer)
-                    # html_chunk = f'<div hx-swap-oob="innerHTML:#{content_id}">{rendered_html</div>'
+
+                delta = event[0].get("delta", {})
+                finish_reason = event[0].get("finish_reason")
+
+                if reasoning := delta.get("reasoning_content"):
+                    reasoning_buffer += reasoning
+                    if show_reasoning:
+                        html_chunk = f'<div hx-swap-oob="beforeend:#{reasoning_id}">{reasoning}</div>'
+                        await websocket.send_text(html_chunk)
+
+                if content := delta.get("content"):
+                    content_buffer += content
+                    html_chunk = f'<div hx-swap-oob="innerHTML:#{content_id}">{content}</div>'
                     await websocket.send_text(html_chunk)
-                    answer += content
-                    
-                reasoning = delta.get("reasoning_content")
-                if reasoning:
-                    reasoning_content += reasoning   
-                if show_reasoning and reasoning:
-                    html_chunk = f'<span hx-swap-oob="beforeend:#{reasoning_id}">{reasoning.replace("\\n", "<br>")}</span>'
-                    await websocket.send_text(html_chunk)
-                    
-                # tool_calls = delta.get("tool_calls")
-                if "tool_calls" in delta:
-                    try:
-                        arguments_buffer += delta.get("tool_calls")[0].get("function").get("arguments")
-                        if not tool_call:
-                            tool_call = delta.get("tool_calls")[0].get("function")
-                        if not tool_id:
-                            tool_id = delta.get("id")
-                        pending_tool_json = json.loads(arguments_buffer)
-                        had_tool_call = True
-                        tool_call['arguments'] = pending_tool_json
-                        await call_queue.put({"tool_call": tool_call, "files": uploaded_files, "session_id": session_id})
-                        await call_queue.join()
-                        while not result_queue.empty():
-                            result = await result_queue.get()
-                            result_queue.task_done()
-                        current_messages.append({
-                            "role": "assistant",
-                            "tool_calls": tool_call,
-                            "content": "",
-                            "reasoning_content": reasoning_content or ""
-                        })
-                        current_messages.append({
-                            "role": "tool",
-                            "content": result,
-                            "name": pending_tool_json.get("name")
-                        })
-                    except json.JSONDecodeError:
-                        continue
-                    
-                # if finish_reason == "tool_calls":
-                #     if had_tool_call:
-                #         current_messages.append({"role": "assistant", "tool_calls": tool_calls_to_execute})
-                #         for tool_call in tool_calls_to_execute:
-                #             await call_queue.put({"tool_call": tool_call, "files": uploaded_files})
-
-                #         await call_queue.join()
-                #         tool_results = []
-                #         while not result_queue.empty():
-                #             result = await result_queue.get()
-                #             tool_results.append(result)
-                #             result_queue.task_done()
-                #         current_messages.extend(tool_results)
-                #         continue
-                elif finish_reason == "stop":
-                    if reasoning_content and ("</think>" not in reasoning_content):
-                        print("⚠️ Incomplete <think> detected at stop; clearing reasoning_content.")
-                        reasoning_content = ""
-                    # if had_tool_call:
-                    #     current_messages.append({"role": "assistant", "tool_calls": tool_calls_to_execute})
-                    #     for tool_call in tool_calls_to_execute:
-                    #         await call_queue.put({"tool_call": tool_call, "files": uploaded_files})
-
-                    #     await call_queue.join()
-                    #     tool_results = []
-                    #     while not result_queue.empty():
-                    #         result = await result_queue.get()
-                    #         tool_results.append(result)
-                    #         result_queue.task_done()
-                    #     current_messages.extend(tool_results)
-                    else:
-                        current_messages.append({"role": "assistant", "content": answer, "reasoning_content": reasoning_content})
-                        break
-            if finish_reason is None:
-                print("⚠️ Stream ended without a finish_reason.")
-                # Handle partial reasoning separately
-                if reasoning_content and ("</think>" not in reasoning_content):
-                    print("⚠️ Incomplete <think> block detected; trimming reasoning.")
-                    reasoning_content = reasoning_content.split("<think>")[-1]  # keep inner text only, drop tag
-                    reasoning_content = reasoning_content[:reasoning_content.find("</think>")] if "</think>" in reasoning_content else ""
-
-                # 🧠 if a full tool_call JSON chunk was parsed, execute it anyway
-                if had_tool_call: # and pending_tool_json:
-                    print("🛠️ Forcing tool execution despite missing finish_reason.")
-
-
-                    try:
-                        arguments_buffer += delta.get("tool_calls")[0].get("function").get("arguments")
-                        pending_tool_json = json.loads(arguments_buffer)
-                        had_tool_call = True
-                        await call_queue.put({"tool_call": pending_tool_json, "files": uploaded_files, "session_id": session_id})
-                        await call_queue.join()
-                        while not result_queue.empty():
-                            result = await result_queue.get()
-                            result_queue.task_done()
-                        current_messages.append({
-                            "role": "assistant",
-                            "tool_calls": [pending_tool_json],
-                            "content": "",
-                            "reasoning_content": reasoning_content or ""
-                        })
-                        current_messages.append({
-                            "role": "tool",
-                            "content": result,
-                            "name": pending_tool_json.get("name")
-                        })
-                    except json.JSONDecodeError:
-                        continue
-                    
-                    # await call_queue.put({"tool_call": pending_tool_json, "files": uploaded_files})
-                    # await call_queue.join()
-                    # while not result_queue.empty():
-                    #     result = await result_queue.get()
-                    #     result_queue.task_done()
-                    # current_messages.append({
-                    #     "role": "assistant",
-                    #     "tool_calls": [pending_tool_json],
-                    #     "content": "",
-                    #     "reasoning_content": reasoning_content or ""
-                    # })
-                    # current_messages.append({
-                    #     "role": "tool",
-                    #     "content": result,
-                    #     "name": pending_tool_json.get("name")
-                    # })
-                    # continue
-
-                # otherwise just append a normal assistant turn if clean
-                if answer or reasoning_content:
-                    current_messages.append({
-                        "role": "assistant",
-                        "content": answer.strip(),
-                        "reasoning_content": reasoning_content.strip()
-                    })
-                continue
-
-
-
-            # if finish_reason is None:
-            #     print("⚠️ Stream ended without a finish_reason.")
-            #     # Discard incomplete reasoning or tool calls — they corrupt next prefill
-            #     if reasoning_content and ("</think>" not in reasoning_content):
-            #         print("⚠️ Incomplete <think> block detected, skipping this assistant turn.")
-            #         reasoning_content = ""
-            #     if had_tool_call and not finish_reason:
-            #         print("⚠️ Incomplete tool call, skipping this assistant turn.")
-            #         continue
-            #     if answer or reasoning_content:
-            #         current_messages.append({
-            #             "role": "assistant",
-            #             "content": answer.strip() if answer else "",
-            #             "reasoning_content": reasoning_content.strip() if reasoning_content else ""
-            #         })
-            #     continue
-            # else:
-            #     break
                 
+                if finish_reason == "tool_calls":
+                    tool_calls = delta.get("tool_calls", [])
+                    if reasoning_buffer and "<think>" in reasoning_buffer and "</think>" not in reasoning_buffer:
+                        reasoning_buffer += "</think>"
+                    next_turn_messages.append({
+                                                "role": "assistant",
+                                                "content": content_buffer or "",
+                                                "reasoning_content": reasoning_buffer or "",
+                                                "tool_calls": tool_calls,
+                                            })
+                    print(f"--- NXT_MSGS: {next_turn_messages}") 
+                    for call in tool_calls:
+                        tool_html = f'<div hx-swap-oob="beforeend:#chat-messages" class="text-sm text-blue-500"> Executing {call["function"]["name"]}...</div>'
+                        await websocket.send_text(tool_html)
+                        await call_queue.put({
+                            "tool_call": json.dumps(call),
+                            "files": uploaded_files,
+                            "session_id": session_id
+                        })
+                    
+                    await call_queue.join()
+                    
+                    results = []
+                    while not result_queue.empty():
+                        result = await result_queue.get()
+                        results.append(result)
+                        result_queue.task_done()
+
+                    next_turn_messages.extend(results)                    
+
+            if finish_reason == "stop":
+                if reasoning_buffer and "<think>" in reasoning_buffer and "</think>" not in reasoning_buffer:
+                    reasoning_buffer += "</think>"
+                current_messages.append({
+                    "role": "assistant",
+                    "content": content_buffer or "",
+                    "reasoning_buffer": reasoning_buffer or "",
+                })
+                print(f"--- MSGS: {current_messages}")
+
+                break 
+    
     except Exception as e:
         error_html = f'<div hx-swap-oob="beforeend:#{content_id}" class="text-sm text-red-500">[Error]: {e}</div>'
         await websocket.send_text(error_html)
