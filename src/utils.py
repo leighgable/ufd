@@ -49,11 +49,6 @@ def get_current_location():
     ll = requests.post("http://ip-api.com/json?fields=lat,lon").json()
     return ll['lat'], ll['lon']
 
-def edit_dir_str(files: list[dict[str, Any]],
-    dirname: str = '/home/user',
-) -> list[dict[str, Any]]:
-    return [{"path": dirname + x["path"].split("/")[-1], "data": x["data"]} for x in files]
-
 def run_code_interpreter(code: str,
         files: Optional[list[dict[str, Any]]] = None,
         session_id: str = None,
@@ -64,7 +59,13 @@ def run_code_interpreter(code: str,
     """
     sbx = get_sandbox(session_id)
     if files:
-        sbx.files.write(edit_dir_str(files=files))        
+        # Loop through the files and write them to the sandbox one by one.
+        for file_info in files:
+            print(f"====FILES: {file_info}")
+            # The file's 'path' is already the basename, so we just place it in the sandbox's home directory.
+            with open(file_info, "rb") as file:
+                sbx.files.write(file_info, file)
+            
     execution = sbx.run_code(code)
     print(f"\n\nSANDBOX CREATED:\n{sbx.get_info()}\n\n")
     return execution

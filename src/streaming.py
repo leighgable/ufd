@@ -58,30 +58,44 @@ def call_function(tool_call: Dict[str, Any],
 ) -> Dict[str, Any]:
 
     fn_name = tool_call.get("function", {}).get("name", "run_code_interpreter")
+    fn_id = tool_call.get("id", "missing_id")  # Get ID early
+
     try:
-        fn_args: dict = tool_call.get("function", "{}").get("arguments", "{}")
-        fn_id = tool_call.get("id", "missing_id")
+        fn_args_str = tool_call.get("function", {}).get("arguments", "{}")
         
+        # Handle empty strings and potential double-encoding from the model
+        parsed_args = json.loads(fn_args_str) if fn_args_str.strip() else {}
+
+        # The model sometimes double-encodes the JSON arguments as a string
+        if isinstance(parsed_args, str):
+            fn_args = json.loads(parsed_args)
+        else:
+            fn_args = parsed_args
+
+        # Ensure fn_args is a dictionary before proceeding
+        if not isinstance(fn_args, dict):
+            # This handles cases where the model returns a single value instead of a dict,
+            # e.g., just the code string for run_code_interpreter.
+            fn_args = {"code": fn_args}
+
         if fn_name == "run_code_interpreter":
             fn_args['files'] = files
             fn_args['session_id'] = session_id
             
         execution_result_obj = get_function_by_name(fn_name)(**fn_args)
-        print(f"---- EXEC RESULT: {execution_result_obj}")
         parsed_outputs = parse_sbx_exec(execution_result_obj)
-        print(f"---- PARSED RESULT: {parsed_outputs}")
         content_str = json.dumps(parsed_outputs)
-        print(f"---- JSON RESULT: {execution_result_obj}")
+        
         return {
             "role": "tool",
             "tool_call_id": fn_id,
             "content": content_str,
         }
     except Exception as e:
-        print(f"Error during tool call: {e}", file=sys.stderr)
+        print(f"Error executing tool '{fn_name}' (ID: {fn_id}): {e}", file=sys.stderr)
         return {
             "role": "tool",
-            "tool_call_id": tool_call.get("id", "missing"),
+            "tool_call_id": fn_id,
             "content": f"Error executing tool: {e}",
         }
 
@@ -105,7 +119,6 @@ async def astream_llama_cpp_response(
     Makes an asynchronous streaming request to the llama.cpp server using httpx.
     This is non-blocking. It accumulates tool calls and yields them at the end.
     """
-
     payload = {"stream": True}
     if tools:
         payload['tools'] = tools
@@ -116,11 +129,10 @@ async def astream_llama_cpp_response(
     if files:
         payload["messages"] = create_message_with_files(messages)
 
-    headers = {
-        "Content-Type": "application/json",
-    }
+    headers = {"Content-Type": "application/json"}
     
-    tool_calls_buffer = []
+    wip_tool_calls = {}  # Work-in-progress tool calls, keyed by index
+
     async with httpx.AsyncClient(timeout=30) as client:
         try:
             async with client.stream("POST", client_cfg['base_url'], headers=headers, json=payload) as response:
@@ -133,10 +145,41 @@ async def astream_llama_cpp_response(
                                 break
                             chunk = json.loads(data_str)
                             
-                            if chunk.get("choices")[0].get("delta").get("tool_calls"):
-                                tool_calls_buffer.extend(chunk["choices"][0]["delta"]["tool_calls"])
+                            choices = chunk.get("choices")
+                            if not isinstance(choices, list) or not choices:
+                                continue
+
+                            delta = choices[0].get("delta", {})
+                            if not isinstance(delta, dict):
+                                yield choices
+                                continue
+                            
+                            # Safely handle tool call accumulation
+                            if "tool_calls" in delta:
+                                partial_calls = delta["tool_calls"]
+                                if isinstance(partial_calls, list):
+                                    for p_call in partial_calls:
+                                        if not isinstance(p_call, dict): continue
+                                        
+                                        # Use index to distinguish concurrent tool calls
+                                        index = p_call.get("index", 0)
+
+                                        # Initialize tool call if it's the first time we see it
+                                        if index not in wip_tool_calls:
+                                            wip_tool_calls[index] = {"id": "", "type": "function", "function": {"name": "", "arguments": ""}}
+                                        
+                                        # Accumulate parts
+                                        if p_call.get("id"):
+                                            wip_tool_calls[index]["id"] = p_call["id"]
+                                        
+                                        if func := p_call.get("function"):
+                                            if func.get("name"):
+                                                wip_tool_calls[index]["function"]["name"] += func["name"]
+                                            if func.get("arguments"):
+                                                wip_tool_calls[index]["function"]["arguments"] += func["arguments"]
                             else:
-                                yield chunk.get("choices")
+                                # Not a tool call chunk, so yield it
+                                yield choices
 
                         except json.JSONDecodeError:
                             continue
@@ -144,10 +187,21 @@ async def astream_llama_cpp_response(
                             print(f"\n[An unexpected error occurred during stream processing: {e}]")
                             break
             
-            if tool_calls_buffer:
-                # We have tool calls to yield
+            # After the stream is done, yield the completed tool calls
+            if wip_tool_calls:
+                final_tool_calls = [wip_tool_calls[i] for i in sorted(wip_tool_calls.keys())]
+                
+                # Final validation of argument JSON
+                for call in final_tool_calls:
+                    try:
+                        json.loads(call["function"]["arguments"])
+                    except json.JSONDecodeError as e:
+                        # The accumulated arguments are not valid JSON.
+                        # This can happen if the model output is malformed.
+                        print(f"Warning: Could not parse tool call arguments for call id {call.get('id')}. Error: {e}", file=sys.stderr)
+
                 yield [{
-                    "delta": {"tool_calls": tool_calls_buffer},
+                    "delta": {"tool_calls": final_tool_calls},
                     "finish_reason": "tool_calls"
                 }]
 

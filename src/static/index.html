@@ -141,9 +141,10 @@
       if (!container) return;
 
       // Check if the content is overflowing
-      const isOverflowing = container.scrollHeight > container.clientHeight;
+      const lineCount = container.innerText.split('\n').length;
+      const maxLines = 5;
 
-      if (isOverflowing && !container.querySelector('.show-more-btn')) {
+      if (lineCount > maxLines && !container.parentNode.querySelector('.show-more-btn')) {
         container.classList.add('line-clamp-3');
 
         const button = document.createElement('button');

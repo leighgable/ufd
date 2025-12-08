@@ -20,7 +20,6 @@ from .streaming import (
     call_function,
     astream_llama_cpp_response,
     client_cfg,
-    MarkdownBufferProcessor,
 )
 from .utils import create_message_with_files
 from .sandbox_manager import close_sandbox
@@ -253,17 +252,26 @@ async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: 
             current_messages.extend(next_turn_messages)
             next_turn_messages.clear()
             print(f"----- CURRENT_MESSAGES: {current_messages}")
+
+            # Clear the content bubble at the start of each new turn
+            clear_content_html = f'<div hx-swap-oob="innerHTML:#{content_id}"></div>'
+            await websocket.send_text(clear_content_html)
+
             stream = astream_llama_cpp_response(messages=current_messages, tools=AVAILABLE_TOOLS, client_cfg=client_cfg)
             
             content_buffer = ""
             reasoning_buffer = ""
-            
+            tool_calls = []
+            finish_reason = None
+
+            # 1. Process the stream for the current turn
             async for event in stream:
-                if not event or not event[0]:
+                if not event or event[0] is None:
                     continue
 
                 delta = event[0].get("delta", {})
-                finish_reason = event[0].get("finish_reason")
+                if fr := event[0].get("finish_reason"):
+                    finish_reason = fr
 
                 if reasoning := delta.get("reasoning_content"):
                     reasoning_buffer += reasoning
@@ -273,51 +281,66 @@ async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: 
 
                 if content := delta.get("content"):
                     content_buffer += content
-                    html_chunk = f'<div hx-swap-oob="innerHTML:#{content_id}">{content}</div>'
+                    # Stream the content to the UI as it arrives
+                    html_chunk = f'<div hx-swap-oob="innerHTML:#{content_id}">{content_buffer}</div>'
                     await websocket.send_text(html_chunk)
-                
-                if finish_reason == "tool_calls":
-                    tool_calls = delta.get("tool_calls", [])
-                    if reasoning_buffer and "<think>" in reasoning_buffer and "</think>" not in reasoning_buffer:
-                        reasoning_buffer += "</think>"
-                    next_turn_messages.append({
-                                                "role": "assistant",
-                                                "content": content_buffer or "",
-                                                "reasoning_content": reasoning_buffer or "",
-                                                "tool_calls": tool_calls,
-                                            })
-                    print(f"--- NXT_MSGS: {next_turn_messages}") 
-                    for call in tool_calls:
-                        tool_html = f'<div hx-swap-oob="beforeend:#chat-messages" class="text-sm text-blue-500"> Executing {call["function"]["name"]}...</div>'
-                        await websocket.send_text(tool_html)
-                        await call_queue.put({
-                            "tool_call": json.dumps(call),
-                            "files": uploaded_files,
-                            "session_id": session_id
-                        })
-                    
-                    await call_queue.join()
-                    
-                    results = []
-                    while not result_queue.empty():
-                        result = await result_queue.get()
-                        results.append(result)
-                        result_queue.task_done()
 
-                    next_turn_messages.extend(results)                    
+                if tc := delta.get("tool_calls"):
+                    tool_calls.extend(tc)
 
-            if finish_reason == "stop":
-                if reasoning_buffer and "<think>" in reasoning_buffer and "</think>" not in reasoning_buffer:
-                    reasoning_buffer += "</think>"
-                current_messages.append({
+            # 2. After the stream is finished, decide what to do
+            if finish_reason == "tool_calls":
+                # This was a tool-use turn. Set up for the next one.
+                assistant_message = {
                     "role": "assistant",
                     "content": content_buffer or "",
-                    "reasoning_buffer": reasoning_buffer or "",
-                })
-                print(f"--- MSGS: {current_messages}")
+                    "reasoning_content": reasoning_buffer or "",
+                    "tool_calls": tool_calls,
+                }
+                
+                # Execute tools and collect results
+                results = []
+                for call in tool_calls:
+                    tool_html = f'<div hx-swap-oob="beforeend:#chat-messages" class="text-sm text-blue-500"> Executing {call["function"]["name"]}...</div>'
+                    await websocket.send_text(tool_html)
+                    await call_queue.put({
+                        "tool_call": json.dumps(call),
+                        "files": uploaded_files,
+                        "session_id": session_id
+                    })
+                
+                await call_queue.join()
+                
+                while not result_queue.empty():
+                    result = await result_queue.get()
+                    results.append(result)
+                    result_queue.task_done()
+                
+                # Prepare messages for the next turn
+                next_turn_messages.append(assistant_message)
+                next_turn_messages.extend(results)
+                print(f"--- NXT_MSGS: {next_turn_messages}") 
 
+            else:
+                # This is the final answer turn (finish_reason is "stop" or None).
+                print(f"Loop ended. Finish reason: {finish_reason}")
+                # The final answer has already been streamed into the content bubble.
+                # We just need to exit the loop.
                 break 
-    
+        if show_reasoning:
+            script_container_id = f"script-container-{response_id}"
+            script_html = f'''
+        <div id={script_container_id} hx-swap-oob="beforeend:#chat-messages">
+            <script>
+                addShowMore(f"reasoning-{response_id}");
+                const scriptContainer = document.getElementById('{script_container_id}');
+                if (scriptContainer) {{
+                    scriptContainer.remove();
+                }}
+            </script>
+        </div>
+            '''
+            await websocket.send_text(script_html)
     except Exception as e:
         error_html = f'<div hx-swap-oob="beforeend:#{content_id}" class="text-sm text-red-500">[Error]: {e}</div>'
         await websocket.send_text(error_html)
