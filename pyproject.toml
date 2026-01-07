@@ -1,7 +1,15 @@
 [project]
-name = "impure-package"
+name = "ufd-agent"
 version = "0.1.0"
 description = "Add your description here"
 authors = [ ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+  "websockets",
+  "fastapi[standard]",
+  "requests",
+  "jinja2",
+  "markdown",
+  "e2b_code_interpreter",
+  "markdown-it-py"
+]

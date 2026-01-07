@@ -23,13 +23,24 @@ def create_message_with_files(prompt: str,
     
     content_parts = [{"type": "text", "text": prompt}]
     
-    for path in file_paths:
-        print(f"[Message Creator] Adding file(s) to message: {path}")
-        content_parts.append({"type": "text", "text": f"Attached file: {path}"})
+    if file_paths:
+        file_names = [os.path.basename(path) for path in file_paths]
+        file_list_str = ", ".join(f"'{name}'" for name in file_names)
+        # Inform the LLM that the files are available by their names in the working directory.
+        content_parts.append({
+            "type": "text", 
+            "text": f"\nThe following file(s) have been uploaded and are available in the current working directory: {file_list_str}"
+        })
+
+    # If there is only one part (just the text prompt), use a simple string for content.
+    # Otherwise, use the list of parts to accommodate file information.
+    final_content = content_parts
+    if len(content_parts) == 1:
+        final_content = content_parts[0]['text']
 
     user_message = {
         "role": "user",
-        "content": content_parts,
+        "content": final_content,
     }
     
     return [user_message]
@@ -59,12 +70,14 @@ def run_code_interpreter(code: str,
     """
     sbx = get_sandbox(session_id)
     if files:
-        # Loop through the files and write them to the sandbox one by one.
         for file_info in files:
-            print(f"====FILES: {file_info}")
-            # The file's 'path' is already the basename, so we just place it in the sandbox's home directory.
-            with open(file_info, "rb") as file:
-                sbx.files.write(file_info, file)
+            file_path = file_info.get("path") # This is the basename
+            file_data = file_info.get("data")
+            if file_path and file_data:
+                # Construct a path inside the sandbox's home directory
+                remote_path = f"/home/user/{file_path}" 
+                print(f"====WRITING FILE TO SANDBOX: {remote_path}")
+                sbx.files.write(remote_path, file_data)
             
     execution = sbx.run_code(code)
     print(f"\n\nSANDBOX CREATED:\n{sbx.get_info()}\n\n")

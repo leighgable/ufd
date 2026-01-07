@@ -23,16 +23,22 @@ from .streaming import (
 )
 from .utils import create_message_with_files
 from .sandbox_manager import close_sandbox
+from .markdown_functional import (
+    process_markdown_stream,
+    finalize_markdown as finalize_markdown_text,
+    md as md_parser
+)
 import uuid
 
 # --- Variables from old templates.py ---
 react_instructions = {
     "role": "system",
     "content": dedent("""
-        You are an expert with strong analytical skills! 🧠
-        You have access to tools. To call a tool, you make a function call with the function name and the arguments in JSON format.\n
-        **IMPORTANT**: Ensure the 'arguments' field is always a valid JSON string.
-        Don't overthink your answers, and use your python tool to test your code.""")
+        You are a powerful problem-solving assistant. You have access to a set of tools to help you answer user questions.
+        **IMPORTANT**:
+        - Ensure the 'arguments' field for any tool call is always a valid JSON string.
+        - Use your python tool to test your code when needed. 
+        - Do not provide a final answer until there are no errors from your code tool.""")
 }
 
 FN_NAME = '✿FUNCTION✿'
@@ -135,10 +141,15 @@ async def upload_file(files: list[UploadFile] = File(...)):
 async def websocket_endpoint(websocket: WebSocket):
     await websocket.accept()
     session_id = str(uuid.uuid4())
+    
+    # --- New Session State ---
+    chat_history = [react_instructions]
+    session_files = []
+    # -------------------------
+
     try:
         while True:
             response_id = int(asyncio.get_running_loop().time() * 1000)
-
             session_dir = f"tmp/{response_id}"
             os.makedirs(session_dir, exist_ok=True)
             
@@ -149,24 +160,28 @@ async def websocket_endpoint(websocket: WebSocket):
             
             show_reasoning_str = parsed_data.get("show_reasoning", "false")
             max_iterations_str = parsed_data.get("max_iterations", "5")
-
             uploaded_file_paths = parsed_data.get("uploaded_file_paths", [])
 
             show_reasoning = show_reasoning_str in ["true", "on"]
             max_iterations = int(max_iterations_str)
 
-
-            new_file_paths = []
+            # --- File Handling for Session ---
+            newly_uploaded_files = []
             if uploaded_file_paths:
                 for path in uploaded_file_paths:
                     if os.path.exists(path):
                         new_path = os.path.join(session_dir, os.path.basename(path))
                         shutil.move(path, new_path)
-                    new_file_paths.append(new_path)
+                        with open(new_path, "rb") as f:
+                            file_data = f.read()
+                        session_files.append({"path": os.path.basename(new_path), "data": file_data})
+                        newly_uploaded_files.append(new_path)
+            
             file_list_html = ""
-            if new_file_paths:
-                items = "".join([f"<li>{os.path.basename(path)}</li>" for path in new_file_paths])
+            if newly_uploaded_files:
+                items = "".join([f"<li>{os.path.basename(path)}</li>" for path in newly_uploaded_files])
                 file_list_html = f"<div class='file-list text-xs text-gray-500 dark:text-gray-400'>Attached:<ul>{items}</ul></div>"
+            # ---------------------------------
             
             display_prompt = prompt + file_list_html
             
@@ -181,7 +196,6 @@ async def websocket_endpoint(websocket: WebSocket):
             '''
             await websocket.send_text(user_bubble)
 
-
             if show_reasoning:
                 reasoning_bubble = f'''
                     <div hx-swap-oob="beforeend:#chat-messages">
@@ -195,7 +209,6 @@ async def websocket_endpoint(websocket: WebSocket):
                 '''
                 await websocket.send_text(reasoning_bubble)
 
-            # --- Part 2: Send the agent's initial bubble with containers ---
             content_bubble = f'''
                 <div hx-swap-oob="beforeend:#chat-messages">
                     <div class="flex justify-start">
@@ -207,35 +220,57 @@ async def websocket_endpoint(websocket: WebSocket):
             '''
             await websocket.send_text(content_bubble)
 
-            # --- Part 3: Run the agent logic and stream responses ---
-            await agent_stream_logic(websocket, prompt, show_reasoning, response_id, max_iterations, new_file_paths, session_id)
+            # --- Updated Agent Logic Call ---
+            # 1. Create the user message for this specific turn
+            user_message_for_turn = create_message_with_files(prompt, [f['path'] for f in session_files])
+
+            # 2. Construct the message list for this agent run
+            messages_for_this_run = chat_history + user_message_for_turn
+            
+            # 3. Call the agent and get the final answer
+            final_answer_text = await agent_stream_logic(
+                websocket=websocket,
+                messages=messages_for_this_run,
+                show_reasoning=show_reasoning,
+                response_id=response_id,
+                max_iterations=max_iterations,
+                session_files=session_files,
+                session_id=session_id
+            )
+
+            # 4. Permanently update the chat history for the next turn
+            chat_history.extend(user_message_for_turn)
+            chat_history.append({"role": "assistant", "content": final_answer_text})
+            # --------------------------------
 
     except WebSocketDisconnect:
         print("Client disconnected from WebSocket.")
     except Exception as e:
         print(f"WebSocket error: {e}")
-        # Send an error message to the client
         error_html = f'<div hx-swap-oob="beforeend:#chat-messages" class="text-sm text-red-500">[WebSocket Error]: {e}</div>'
         await websocket.send_text(error_html)
     finally:
         close_sandbox(session_id)
 
-async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: bool, response_id: str, max_iterations: int, uploaded_file_paths: List[str], session_id: str) -> None:
-    """The main agent loop, now sending HTML directly over WebSocket."""
-
-    uploaded_files = []
-    for file_path in uploaded_file_paths:
-        with open(file_path, "rb") as f:
-            uploaded_files.append({"path": os.path.basename(file_path), "data": f.read()})
-
-    user_message = create_message_with_files(prompt, uploaded_file_paths)
-
-    current_messages = [react_instructions] 
-    current_messages.extend(user_message)
+async def agent_stream_logic(
+    websocket: WebSocket,
+    messages: List[Dict[str, Any]],
+    show_reasoning: bool,
+    response_id: str,
+    max_iterations: int,
+    session_files: List[Dict[str, Any]],
+    session_id: str
+) -> str:
+    """
+    The main agent loop, now sending HTML directly over WebSocket.
+    Accepts the full message history and returns the final answer text.
+    """
+    current_messages = list(messages)
     print(f"CURRENT_MESSAGES: {current_messages}")
     call_queue = agent_context["call_queue"]
     result_queue = agent_context["result_queue"]
 
+    # Clear queues for this run
     while not call_queue.empty():
         call_queue.get_nowait()
     while not result_queue.empty():
@@ -245,6 +280,8 @@ async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: 
     reasoning_id = f"reasoning-{response_id}"
 
     next_turn_messages = []
+    final_answer_text = ""
+    error_in_previous_turn = False
     
     try:
         for turn in range(max_iterations):
@@ -253,7 +290,6 @@ async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: 
             next_turn_messages.clear()
             print(f"----- CURRENT_MESSAGES: {current_messages}")
 
-            # Clear the content bubble at the start of each new turn
             clear_content_html = f'<div hx-swap-oob="innerHTML:#{content_id}"></div>'
             await websocket.send_text(clear_content_html)
 
@@ -261,53 +297,49 @@ async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: 
             
             content_buffer = ""
             reasoning_buffer = ""
+            unstable_buffer = ""
+            stable_text = ""
             tool_calls = []
             finish_reason = None
 
-            # 1. Process the stream for the current turn
             async for event in stream:
                 if not event or event[0] is None:
                     continue
-
                 delta = event[0].get("delta", {})
                 if fr := event[0].get("finish_reason"):
                     finish_reason = fr
-
                 if reasoning := delta.get("reasoning_content"):
                     reasoning_buffer += reasoning
                     if show_reasoning:
                         html_chunk = f'<div hx-swap-oob="beforeend:#{reasoning_id}">{reasoning}</div>'
                         await websocket.send_text(html_chunk)
-
                 if content := delta.get("content"):
                     content_buffer += content
-                    # Stream the content to the UI as it arrives
-                    html_chunk = f'<div hx-swap-oob="innerHTML:#{content_id}">{content_buffer}</div>'
-                    await websocket.send_text(html_chunk)
-
+                    unstable_buffer, stable_text = process_markdown_stream(content, unstable_buffer, stable_text)
+                    if stable_text:
+                        html_fragment = md_parser.render(stable_text)
+                        html_chunk = f'<div hx-swap-oob="innerHTML:#{content_id}">{html_fragment}</div>'
+                        await websocket.send_text(html_chunk)
                 if tc := delta.get("tool_calls"):
                     tool_calls.extend(tc)
 
+            final_text = finalize_markdown_text(unstable_buffer, stable_text)
+            if final_text:
+                final_html = md_parser.render(final_text)
+                html_chunk = f'<div hx-swap-oob="innerHTML:#{content_id}">{final_html}</div>'
+                await websocket.send_text(html_chunk)
+            
+            final_answer_text = final_text
+
             # 2. After the stream is finished, decide what to do
+            # and set up for the next turn if necessary.
             if finish_reason == "tool_calls":
-                # This was a tool-use turn. Set up for the next one.
-                assistant_message = {
-                    "role": "assistant",
-                    "content": content_buffer or "",
-                    "reasoning_content": reasoning_buffer or "",
-                    "tool_calls": tool_calls,
-                }
-                
-                # Execute tools and collect results
+                assistant_message_for_history = {"role": "assistant", "content": content_buffer or "", "tool_calls": tool_calls}
                 results = []
                 for call in tool_calls:
                     tool_html = f'<div hx-swap-oob="beforeend:#chat-messages" class="text-sm text-blue-500"> Executing {call["function"]["name"]}...</div>'
                     await websocket.send_text(tool_html)
-                    await call_queue.put({
-                        "tool_call": json.dumps(call),
-                        "files": uploaded_files,
-                        "session_id": session_id
-                    })
+                    await call_queue.put({"tool_call": json.dumps(call), "files": session_files, "session_id": session_id})
                 
                 await call_queue.join()
                 
@@ -316,17 +348,24 @@ async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: 
                     results.append(result)
                     result_queue.task_done()
                 
-                # Prepare messages for the next turn
-                next_turn_messages.append(assistant_message)
+                # Set the flag for the *next* turn if an error occurred.
+                error_in_previous_turn = any(res.get("is_error", False) for res in results)
+                next_turn_messages.append(assistant_message_for_history)
                 next_turn_messages.extend(results)
-                print(f"--- NXT_MSGS: {next_turn_messages}") 
+                print(f"--- NXT_MSGS: {next_turn_messages}")
 
+            # 3. Decide whether to continue the loop.
+            if finish_reason == "stop" and not is_correction_turn:
+                # The model wants to stop, and it wasn't a correction turn.
+                # This is a genuine, clean stop.
+                print(f"Loop ended cleanly. Finish reason: {finish_reason}")
+                break
             else:
-                # This is the final answer turn (finish_reason is "stop" or None).
-                print(f"Loop ended. Finish reason: {finish_reason}")
-                # The final answer has already been streamed into the content bubble.
-                # We just need to exit the loop.
-                break 
+                # We continue if:
+                # 1. The model issued a tool call (`finish_reason` was 'tool_calls').
+                # 2. The model tried to stop, but it was during a correction turn, so we force it to try again.
+                continue
+
         if show_reasoning:
             script_container_id = f"script-container-{response_id}"
             script_html = f'''
@@ -341,9 +380,13 @@ async def agent_stream_logic(websocket: WebSocket, prompt: str, show_reasoning: 
         </div>
             '''
             await websocket.send_text(script_html)
+        
+        return final_answer_text
+
     except Exception as e:
         error_html = f'<div hx-swap-oob="beforeend:#{content_id}" class="text-sm text-red-500">[Error]: {e}</div>'
         await websocket.send_text(error_html)
+        return f"An error occurred: {e}"
 
 if __name__ == "__main__":
     import uvicorn
